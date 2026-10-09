@@ -563,6 +563,17 @@ async function main(): Promise<void> {
     }
 
     await migrateDown(sql, { force: true });
+    if (await indexExists(sql, "agent_runs_one_active_qa")) {
+      throw new Error("Queue down migration left the qa index");
+    }
+    if (!(await skillSlugExists(sql, "orchestrator"))) {
+      throw new Error("Queue down migration removed the orchestrator pack");
+    }
+    if (!(await indexExists(sql, "plans_one_awaiting"))) {
+      throw new Error("Queue down migration removed the awaiting index");
+    }
+
+    await migrateDown(sql, { force: true });
     if (!(await skillSlugExists(sql, "orchestrator"))) {
       throw new Error("Decision down migration removed the orchestrator pack");
     }
@@ -619,7 +630,8 @@ async function main(): Promise<void> {
       !(await tableExists(sql, "sessions")) ||
       !(await columnExists(sql, "provider_credentials", "last_four")) ||
       !(await skillSlugExists(sql, "orchestrator")) ||
-      !(await indexExists(sql, "plans_one_awaiting"))
+      !(await indexExists(sql, "plans_one_awaiting")) ||
+      !(await indexExists(sql, "agent_runs_one_active_qa"))
     ) {
       throw new Error(
         "Up migration did not restore users, sessions, last_four, skills, and plans",

@@ -1,6 +1,6 @@
 # Dawk
 
-Local Phase 1 app through M10. The web app is Next.js. The API is Hono on Bun. Postgres is the database. An Owner can invite an email address. A new account follows the link, signs up, and joins as a Member.
+Local Phase 1 app through M11. The web app is Next.js. The API is Hono on Bun. Postgres is the database. A busy Orchestrator queues work, answers a short question on the side, and waits for the Owner to resolve a conflict.
 
 ## Prerequisites
 
@@ -143,4 +143,4 @@ Do not commit `.env`, API keys, passwords, or session tokens. `SESSION_SECRET` a
 
 ## Scope right now
 
-Local only. An email invite joins a new user as a Member. Queue, Q&A, and conflicts come in a later milestone. Hosting vendors stay undecided until M13.
+Local only. A busy Orchestrator keeps work in order, and only the Owner settles a conflict. Spend pause and cap show on the channel. UI polish comes in a later milestone. Hosting vendors stay undecided until M13.

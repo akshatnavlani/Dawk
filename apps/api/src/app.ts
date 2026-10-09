@@ -13,7 +13,13 @@ import { createDecisionRoutes } from "./decisions/routes";
 import type { Env } from "./env";
 import { createInviteRoutes } from "./invites/routes";
 import { createProjectRoutes } from "./projects/routes";
-import { enqueueRun, executeRun, startContinuation } from "./worker/loop";
+import {
+  drainProject,
+  enqueueRun,
+  executeRun,
+  publishSpend,
+  startContinuation,
+} from "./worker/loop";
 import { createLiveClient, type LlmClient } from "./worker/provider";
 import { createRunRoutes } from "./worker/routes";
 
@@ -80,11 +86,13 @@ export function createApp(deps: AppDeps): Hono {
       rateLimiter: deps.rateLimiter ?? createRateLimiter(),
     }),
   );
+  let notifySpend: (projectId: string) => Promise<void> = async () => {};
   app.route(
     "/",
     createProjectRoutes({
       sql: deps.sql,
       sessionSecret: deps.env.SESSION_SECRET,
+      onSpendChange: (projectId) => notifySpend(projectId),
     }),
   );
   const runLimiter =
@@ -105,24 +113,63 @@ export function createApp(deps: AppDeps): Hono {
       console.error("agent run failed");
     });
   };
+  notifySpend = async (projectId) => {
+    await publishSpend(deps.sql, projectId);
+    const project = await deps.sql<
+      { llm_paused: boolean; spend_cap: string | null; spend_used: string }[]
+    >`
+      select llm_paused, spend_cap::text as spend_cap, spend_used::text as spend_used
+      from projects
+      where id = ${projectId}::uuid
+    `;
+    const row = project[0];
+    const blocked =
+      !row ||
+      row.llm_paused ||
+      (row.spend_cap !== null &&
+        Number(row.spend_used) >= Number(row.spend_cap));
+    if (blocked) {
+      return;
+    }
+    const started = await drainProject(workerDeps, projectId);
+    for (const runId of started) {
+      schedule(runId);
+    }
+  };
+  const startFromMessage = async (
+    channelId: string,
+    userId: string,
+    message: { id: string; body: string; intent?: "work" | "question" },
+    consumeLimit: boolean,
+  ) => {
+    const started = await enqueueRun(
+      {
+        ...workerDeps,
+        allow: (key) => runLimiter.allow(key),
+      },
+      {
+        channelId,
+        userId,
+        messageId: message.id,
+        body: message.body,
+        intent: message.intent,
+        consumeLimit,
+      },
+    );
+    if (started.kind === "started" && "id" in started.run) {
+      schedule(started.run.id);
+    }
+    return started.run;
+  };
   app.route(
     "/",
     createChannelRoutes({
       sql: deps.sql,
       sessionSecret: deps.env.SESSION_SECRET,
-      startRun: async (channelId, userId) => {
-        const started = await enqueueRun(
-          {
-            ...workerDeps,
-            allow: (key) => runLimiter.allow(key),
-          },
-          { channelId, userId },
-        );
-        if (started.kind === "started" && "id" in started.run) {
-          schedule(started.run.id);
-        }
-        return started.run;
-      },
+      startRun: (channelId, userId, message) =>
+        startFromMessage(channelId, userId, message, true),
+      applyIntent: (channelId, userId, message) =>
+        startFromMessage(channelId, userId, message, false),
     }),
   );
   app.route(
@@ -130,8 +177,12 @@ export function createApp(deps: AppDeps): Hono {
     createRunRoutes({
       sql: deps.sql,
       sessionSecret: deps.env.SESSION_SECRET,
-      continueAfterPlan: async (agentId) => {
-        const started = await startContinuation(workerDeps, agentId);
+      continueAfterPlan: async (agentId, requestText) => {
+        const started = await startContinuation(
+          workerDeps,
+          agentId,
+          requestText,
+        );
         if (started.kind === "started" && "id" in started.run) {
           schedule(started.run.id);
         }

@@ -30,7 +30,11 @@ type StepRow = {
   payload: StepPayload;
 };
 
-function jsonError(c: Context, status: 401 | 403 | 404 | 409, error: string) {
+function jsonError(
+  c: Context,
+  status: 400 | 401 | 403 | 404 | 409,
+  error: string,
+) {
   return c.json({ error }, status);
 }
 
@@ -114,7 +118,7 @@ function toPlan(row: {
 export function createRunRoutes(deps: {
   sql: Sql;
   sessionSecret: string;
-  continueAfterPlan: (agentId: string) => Promise<void>;
+  continueAfterPlan: (agentId: string, requestText?: string) => Promise<void>;
 }): Hono {
   const app = new Hono();
 
@@ -222,6 +226,7 @@ export function createRunRoutes(deps: {
 
   app.post("/plans/:id/approve", (c) => resolvePlan(c, deps, "approved"));
   app.post("/plans/:id/reject", (c) => resolvePlan(c, deps, "rejected"));
+  app.post("/conflicts/:id/resolve", (c) => resolveConflict(c, deps));
 
   return app;
 }
@@ -231,7 +236,7 @@ async function resolvePlan(
   deps: {
     sql: Sql;
     sessionSecret: string;
-    continueAfterPlan: (agentId: string) => Promise<void>;
+    continueAfterPlan: (agentId: string, requestText?: string) => Promise<void>;
   },
   nextStatus: "approved" | "rejected",
 ) {
@@ -350,4 +355,162 @@ async function resolvePlan(
   }
   await deps.continueAfterPlan(plan.agent_id);
   return c.json({ plan: toPlan(updated.row) });
+}
+
+type ConflictOption = {
+  label?: string;
+  selected?: boolean;
+  body?: string;
+  role?: string;
+  messageId?: string;
+  userId?: string;
+};
+
+function toConflict(row: {
+  id: string;
+  channel_id: string;
+  status: string;
+  options: ConflictOption[];
+}) {
+  return {
+    id: row.id,
+    channelId: row.channel_id,
+    status: row.status,
+    options: row.options,
+  };
+}
+
+async function resolveConflict(
+  c: Context,
+  deps: {
+    sql: Sql;
+    sessionSecret: string;
+    continueAfterPlan: (agentId: string, requestText?: string) => Promise<void>;
+  },
+) {
+  const user = await currentUser(c, deps.sql, deps.sessionSecret);
+  if (!user) {
+    return jsonError(c, 401, "unauthorized");
+  }
+  const conflictId = z.string().uuid().safeParse(c.req.param("id"));
+  if (!conflictId.success) {
+    return jsonError(c, 404, "not_found");
+  }
+  const parsed = z
+    .object({ optionIndex: z.number().int().nonnegative() })
+    .safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) {
+    return jsonError(c, 400, "invalid_request");
+  }
+  const rows = await deps.sql<
+    {
+      id: string;
+      channel_id: string;
+      status: string;
+      options: ConflictOption[];
+      agent_id: string;
+      role: string | null;
+    }[]
+  >`
+    select
+      conflicts.id,
+      conflicts.channel_id,
+      conflicts.status,
+      conflicts.options,
+      channels.agent_id,
+      memberships.role
+    from conflicts
+    join channels on channels.id = conflicts.channel_id
+    left join memberships
+      on memberships.project_id = channels.project_id
+      and memberships.user_id = ${user.id}::uuid
+    where conflicts.id = ${conflictId.data}::uuid
+  `;
+  const conflict = rows[0];
+  if (!conflict?.role) {
+    return jsonError(c, 404, "not_found");
+  }
+  if (conflict.role !== "owner") {
+    return jsonError(c, 403, "forbidden");
+  }
+  if (conflict.status === "resolved") {
+    return c.json({ conflict: toConflict(conflict) });
+  }
+  const options = Array.isArray(conflict.options) ? conflict.options : [];
+  if (parsed.data.optionIndex >= options.length) {
+    return jsonError(c, 400, "invalid_request");
+  }
+  const nextOptions = options.map((option, index) => ({
+    ...option,
+    selected: index === parsed.data.optionIndex,
+  }));
+  const label =
+    nextOptions[parsed.data.optionIndex]?.label ?? "that instruction";
+  const notice = `Owner chose: ${label}`;
+  const updated = await deps.sql.begin(async (tx) => {
+    const changed = await tx<
+      {
+        id: string;
+        channel_id: string;
+        status: string;
+        options: ConflictOption[];
+      }[]
+    >`
+      update conflicts
+      set
+        status = 'resolved',
+        options = ${tx.json(nextOptions)},
+        resolved_by_user_id = ${user.id}::uuid,
+        resolved_at = now()
+      where id = ${conflict.id}::uuid
+        and status = 'open'
+      returning id, channel_id, status, options
+    `;
+    const row = changed[0];
+    if (!row) {
+      return null;
+    }
+    const messages = await tx<{ id: string; created_at: Date }[]>`
+      insert into messages (channel_id, author_kind, body)
+      values (${conflict.channel_id}::uuid, 'system', ${notice})
+      returning id, created_at
+    `;
+    return { row, message: messages[0] };
+  });
+  if (!updated) {
+    const again = await deps.sql<
+      {
+        id: string;
+        channel_id: string;
+        status: string;
+        options: ConflictOption[];
+      }[]
+    >`
+      select id, channel_id, status, options
+      from conflicts
+      where id = ${conflict.id}::uuid
+    `;
+    const current = again[0];
+    if (current?.status === "resolved") {
+      return c.json({ conflict: toConflict(current) });
+    }
+    return jsonError(c, 409, "conflict_open");
+  }
+  publish(conflict.channel_id, "conflict.resolved", {
+    conflictId: updated.row.id,
+    channelId: updated.row.channel_id,
+    status: "resolved",
+    options: updated.row.options,
+  });
+  if (updated.message) {
+    publishMessageCreated(conflict.channel_id, {
+      id: updated.message.id,
+      body: notice,
+      authorKind: "system",
+      authorUserId: null,
+      createdAt: updated.message.created_at.toISOString(),
+    });
+  }
+  await deps.continueAfterPlan(conflict.agent_id, label);
+  return c.json({ conflict: toConflict(updated.row) });
 }

@@ -32,6 +32,11 @@ const messages: Record<string, string> = {
   invite_declined: "That invite was declined.",
   invite_email_mismatch: "Sign in with the invited email address.",
   mail_failed: "The invite email could not be sent. Try again.",
+  queued: "That request is queued until the Orchestrator is free.",
+  queue_full: "The queue is full. Try again later.",
+  intent_required: "Say whether this is work to queue or a question.",
+  qa_busy: "A question is already being answered.",
+  conflict_open: "An open conflict has to be resolved first.",
 };
 
 export function messageFor(code: string | null): string | null {

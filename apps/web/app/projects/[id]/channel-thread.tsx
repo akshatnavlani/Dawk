@@ -50,6 +50,33 @@ type RunView = {
   steps: RunStep[];
 };
 
+type QueueItem = {
+  id: string;
+  messageId: string;
+  body: string;
+  createdAt: string;
+};
+
+type ConflictOption = {
+  label?: string;
+  body?: string;
+  role?: string;
+  messageId?: string;
+  selected?: boolean;
+};
+
+type ConflictView = {
+  id: string;
+  status: string;
+  options: ConflictOption[];
+};
+
+type SpendView = {
+  spendUsed: number;
+  spendCap: number | null;
+  llmPaused: boolean;
+};
+
 const failureText: Record<string, string> = {
   spend_paused: "LLM calls are paused for this project.",
   spend_cap: "This project is at its spend cap.",
@@ -61,6 +88,11 @@ const failureText: Record<string, string> = {
   agent_busy: "The Orchestrator is already working.",
   awaiting_approval: "A plan is waiting for the owner.",
   rate_limited: "Too many runs were started. Try again later.",
+  queued: "That request is queued until the Orchestrator is free.",
+  queue_full: "The queue is full. Try again later.",
+  intent_required: "Say whether this is work to queue or a question.",
+  qa_busy: "A question is already being answered.",
+  conflict_open: "An open conflict has to be resolved first.",
 };
 
 function mergeMessages(
@@ -95,6 +127,11 @@ export function ChannelThread({
   const [unread, setUnread] = useState<Record<string, number>>({});
   const [run, setRun] = useState<RunView | null>(null);
   const [plan, setPlan] = useState<PlanView | null>(null);
+  const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [conflict, setConflict] = useState<ConflictView | null>(null);
+  const [spend, setSpend] = useState<SpendView | null>(null);
+  const [intentMessageId, setIntentMessageId] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const channelsRef = useRef(channels);
   channelsRef.current = channels;
 
@@ -169,10 +206,38 @@ export function ChannelThread({
       const body = (await response.json()) as { plan?: PlanView | null };
       setPlan(body.plan ?? null);
     }
+    async function loadQueue() {
+      const response = await fetch(
+        `${API_ORIGIN}/channels/${channelId}/queue`,
+        {
+          credentials: "include",
+        },
+      );
+      if (!response.ok || cancelled) {
+        return;
+      }
+      const body = (await response.json()) as { items?: QueueItem[] };
+      setQueue(body.items ?? []);
+    }
+    async function loadConflict() {
+      const response = await fetch(
+        `${API_ORIGIN}/channels/${channelId}/conflicts/open`,
+        { credentials: "include" },
+      );
+      if (!response.ok || cancelled) {
+        return;
+      }
+      const body = (await response.json()) as {
+        conflict?: ConflictView | null;
+      };
+      setConflict(body.conflict ?? null);
+    }
 
     void loadHistory();
     void loadRun();
     void loadPlan();
+    void loadQueue();
+    void loadConflict();
 
     const source = new EventSource(
       `${API_ORIGIN}/channels/${channelId}/events`,
@@ -196,11 +261,25 @@ export function ChannelThread({
     source.addEventListener("plan.updated", () => {
       void loadPlan();
     });
+    source.addEventListener("conflict.opened", () => {
+      void loadConflict();
+    });
+    source.addEventListener("conflict.resolved", () => {
+      void loadConflict();
+      void loadQueue();
+    });
+    source.addEventListener("spend.updated", (event) => {
+      const body = JSON.parse(event.data) as SpendView;
+      setSpend(body);
+      void loadQueue();
+    });
     source.onopen = () => {
       if (opened) {
         void loadHistory();
         void loadRun();
         void loadPlan();
+        void loadQueue();
+        void loadConflict();
       }
       opened = true;
     };
@@ -209,6 +288,27 @@ export function ChannelThread({
       source.close();
     };
   }, [channelId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const response = await fetch(`${API_ORIGIN}/projects/${projectId}`, {
+        credentials: "include",
+      });
+      if (!response.ok || cancelled) {
+        return;
+      }
+      const body = (await response.json()) as SpendView;
+      setSpend({
+        spendUsed: body.spendUsed,
+        spendCap: body.spendCap,
+        llmPaused: body.llmPaused,
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
 
   useEffect(() => {
     if (!channelId) {
@@ -286,6 +386,8 @@ export function ChannelThread({
     }
     setPending(true);
     setError(null);
+    setNotice(null);
+    setIntentMessageId(null);
     const response = await fetch(
       `${API_ORIGIN}/channels/${channelId}/messages`,
       {
@@ -311,12 +413,22 @@ export function ChannelThread({
         ? current
         : [...current, message],
     );
-    if (
-      message.run?.error === "rate_limited" ||
-      message.run?.error === "agent_busy" ||
-      message.run?.error === "awaiting_approval"
-    ) {
-      setError(failureText[message.run.error] ?? "The run did not start.");
+    const code = message.run?.error;
+    if (code === "queued") {
+      setNotice(failureText.queued ?? null);
+    } else if (code === "intent_required") {
+      setIntentMessageId(message.id);
+      setNotice(failureText.intent_required ?? null);
+    } else if (code && failureText[code]) {
+      setError(failureText[code] ?? "The run did not start.");
+    }
+    const queueResponse = await fetch(
+      `${API_ORIGIN}/channels/${channelId}/queue`,
+      { credentials: "include" },
+    );
+    if (queueResponse.ok) {
+      const queued = (await queueResponse.json()) as { items?: QueueItem[] };
+      setQueue(queued.items ?? []);
     }
     const latest = await fetch(
       `${API_ORIGIN}/channels/${channelId}/runs/latest`,
@@ -347,6 +459,67 @@ export function ChannelThread({
       return;
     }
     setPlan(body.plan ?? null);
+  }
+
+  async function chooseIntent(intent: "work" | "question") {
+    if (!channelId || !intentMessageId) {
+      return;
+    }
+    setError(null);
+    setNotice(null);
+    const response = await fetch(
+      `${API_ORIGIN}/channels/${channelId}/messages/${intentMessageId}/intent`,
+      {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ intent }),
+      },
+    );
+    const body = (await response.json()) as { run?: { error?: string } };
+    if (!response.ok) {
+      setError(messageFor("invalid_request"));
+      return;
+    }
+    const code = body.run?.error;
+    if (code === "queued") {
+      setNotice(failureText.queued ?? null);
+      setIntentMessageId(null);
+    } else if (code && failureText[code]) {
+      setError(failureText[code] ?? null);
+    } else {
+      setIntentMessageId(null);
+    }
+    const queueResponse = await fetch(
+      `${API_ORIGIN}/channels/${channelId}/queue`,
+      { credentials: "include" },
+    );
+    if (queueResponse.ok) {
+      const queued = (await queueResponse.json()) as { items?: QueueItem[] };
+      setQueue(queued.items ?? []);
+    }
+  }
+
+  async function chooseConflict(optionIndex: number) {
+    if (!conflict) {
+      return;
+    }
+    setError(null);
+    const response = await fetch(
+      `${API_ORIGIN}/conflicts/${conflict.id}/resolve`,
+      {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ optionIndex }),
+      },
+    );
+    const body = (await response.json()) as { error?: string };
+    if (!response.ok) {
+      setError(messageFor(body.error ?? null));
+      return;
+    }
+    setConflict(null);
   }
 
   const selected = channels.find((channel) => channel.id === channelId);
@@ -383,6 +556,19 @@ export function ChannelThread({
         <p className="text-sm text-stone-500">
           {selected ? `${selected.name} · ${selected.kind}` : "No channel yet."}
         </p>
+        {spend?.llmPaused ? (
+          <p className="mt-3 text-sm text-red-700">
+            LLM calls are paused for this project.
+          </p>
+        ) : null}
+        {spend &&
+        !spend.llmPaused &&
+        spend.spendCap !== null &&
+        spend.spendUsed >= spend.spendCap ? (
+          <p className="mt-3 text-sm text-red-700">
+            This project is at its spend cap.
+          </p>
+        ) : null}
         {nextCursor ? (
           <button
             className="mt-3 text-sm font-medium text-stone-700 underline"
@@ -442,6 +628,40 @@ export function ChannelThread({
             ) : null}
           </div>
         ) : null}
+        {conflict ? (
+          <div className="mt-4 rounded-lg border border-stone-300 bg-stone-50 px-4 py-3">
+            <h3 className="text-sm font-semibold">Conflict</h3>
+            <ul className="mt-2 space-y-2">
+              {conflict.options.map((option, index) => (
+                <li
+                  key={
+                    option.messageId ??
+                    `${option.role ?? "member"}-${option.label ?? option.body ?? "option"}`
+                  }
+                >
+                  <p className="text-sm text-stone-800">
+                    {option.role === "owner" ? "Owner" : "Member"}:{" "}
+                    {option.body ?? option.label}
+                  </p>
+                  {role === "owner" ? (
+                    <button
+                      className={`${buttonClass} mt-2`}
+                      type="button"
+                      onClick={() => void chooseConflict(index)}
+                    >
+                      Choose this
+                    </button>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+            {role === "member" ? (
+              <p className="mt-3 text-sm text-stone-600">
+                Only the owner can resolve this conflict.
+              </p>
+            ) : null}
+          </div>
+        ) : null}
         {run && (run.steps.some((step) => step.notes) || run.failureReason) ? (
           <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
             <h3 className="text-sm font-semibold text-amber-950">Working</h3>
@@ -480,6 +700,37 @@ export function ChannelThread({
             />
           </label>
           {error ? <p className="text-sm text-red-700">{error}</p> : null}
+          {notice ? <p className="text-sm text-stone-600">{notice}</p> : null}
+          {intentMessageId ? (
+            <div className="flex gap-2">
+              <button
+                className={buttonClass}
+                type="button"
+                onClick={() => void chooseIntent("work")}
+              >
+                Queue as work
+              </button>
+              <button
+                className={buttonClass}
+                type="button"
+                onClick={() => void chooseIntent("question")}
+              >
+                Ask as a question
+              </button>
+            </div>
+          ) : null}
+          {queue.length > 0 ? (
+            <div>
+              <h3 className="text-sm font-semibold">Queued</h3>
+              <ul className="mt-2 space-y-1">
+                {queue.map((item) => (
+                  <li key={item.id} className="text-sm text-stone-700">
+                    {item.body}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
           <button className={buttonClass} type="submit" disabled={pending}>
             {pending ? "Sending…" : "Send"}
           </button>

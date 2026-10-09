@@ -117,6 +117,7 @@ function isResponse(value: SessionUser | Response): value is Response {
 export function createProjectRoutes(deps: {
   sql: Sql;
   sessionSecret: string;
+  onSpendChange?: (projectId: string) => Promise<void>;
 }): Hono {
   const app = new Hono();
 
@@ -351,6 +352,12 @@ export function createProjectRoutes(deps: {
     const row = rows[0];
     if (!row) {
       return jsonError(c, 404, "not_found");
+    }
+    if (
+      parsed.data.spendCap !== undefined ||
+      parsed.data.llmPaused !== undefined
+    ) {
+      await deps.onSpendChange?.(projectId.data);
     }
     return c.json(toProject(row));
   });

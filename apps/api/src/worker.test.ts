@@ -284,6 +284,7 @@ describe("worker", () => {
     expect(events).toEqual([
       "message.created",
       "run.started",
+      "spend.updated",
       "run.step",
       "message.created",
       "run.completed",
@@ -743,12 +744,19 @@ describe("worker", () => {
       "Again",
     );
     const busyBody = (await busy.json()) as { run: { error?: string } };
-    expect(busyBody.run.error).toBe("agent_busy");
+    expect(busyBody.run.error).toBe("queued");
     const count = await sql<{ n: number }[]>`
       select count(*)::int as n from agent_runs
       where channel_id = ${heldProject.orchestrator.channelId}::uuid
     `;
     expect(count[0]?.n).toBe(1);
+    const queued = await sql<{ n: number }[]>`
+      select count(*)::int as n
+      from instruction_queue_items
+      where channel_id = ${heldProject.orchestrator.channelId}::uuid
+        and status = 'pending'
+    `;
+    expect(queued[0]?.n).toBe(1);
   });
 
   test("the enqueue limiter does not create a run row", async () => {
@@ -862,7 +870,7 @@ describe("worker", () => {
       "Please keep it small",
     );
     const commentBody = (await comment.json()) as { run: { error?: string } };
-    expect(commentBody.run.error).toBe("awaiting_approval");
+    expect(commentBody.run.error).toBe("queued");
     await settle();
     expect(seen).toHaveLength(1);
 
@@ -888,9 +896,12 @@ describe("worker", () => {
     });
     expect(approved.status).toBe(200);
     await settle();
-    expect(seen).toHaveLength(2);
+    expect(seen).toHaveLength(3);
     expect(seen[1]?.user.includes("approved:")).toBe(true);
     expect(seen[1]?.user.includes("Ship a table.")).toBe(true);
+    expect(
+      seen[2]?.user.includes("Current request:\nPlease keep it small"),
+    ).toBe(true);
     const owner = await sql<{ user_id: string }[]>`
       select user_id from memberships
       where project_id = ${project.id}::uuid and role = 'owner'
@@ -909,7 +920,7 @@ describe("worker", () => {
     });
     expect(again.status).toBe(200);
     await settle();
-    expect(seen).toHaveLength(2);
+    expect(seen).toHaveLength(3);
   });
 
   test("owner reject starts one revision and a second reject does not", async () => {
@@ -1255,5 +1266,461 @@ describe("worker", () => {
         and body = 'Decision rejected: Ship without accounts.'
     `;
     expect(rejectedAfter[0]?.n).toBe(1);
+  });
+
+  test("a queued change runs after the main run finishes", async () => {
+    seen.length = 0;
+    handler = () => finalResult("First answer.");
+    const held = createTestApp({ hold: true });
+    const cookie = await signup(held, emailAddress());
+    const project = await createProject(held, cookie);
+    await saveKey(held, cookie, project.id, {
+      provider: "anthropic",
+      label: "Claude",
+      secret,
+      isPrimary: true,
+    });
+    const started = await postMessage(
+      held,
+      cookie,
+      project.orchestrator.channelId,
+      "Hold this",
+    );
+    const first = (await started.json()) as { run: { id: string } };
+    const queued = await postMessage(
+      held,
+      cookie,
+      project.orchestrator.channelId,
+      "Add a chair",
+    );
+    const queuedBody = (await queued.json()) as { run: { error?: string } };
+    expect(queuedBody.run.error).toBe("queued");
+    await executeRun(
+      {
+        sql,
+        encryptionKey: testEnv().CREDENTIALS_ENCRYPTION_KEY,
+        llm,
+      },
+      first.run.id,
+    );
+    expect(seen.at(-1)?.user.includes("Current request:\nAdd a chair")).toBe(
+      true,
+    );
+    const rows = await sql<{ status: string }[]>`
+      select status from instruction_queue_items
+      where channel_id = ${project.orchestrator.channelId}::uuid
+    `;
+    expect(rows[0]?.status).toBe("completed");
+    const runs = await sql<{ n: number }[]>`
+      select count(*)::int as n from agent_runs
+      where channel_id = ${project.orchestrator.channelId}::uuid
+        and kind = 'main'
+    `;
+    expect(runs[0]?.n).toBe(2);
+  });
+
+  test("a question while busy stays a short side run", async () => {
+    seen.length = 0;
+    handler = () => ({
+      text: JSON.stringify({
+        status: "plan",
+        notes: "Trying to change the plan.",
+        plan: { summary: "Do not save this.", steps: ["One"] },
+      }),
+      tokenIn: 3,
+      tokenOut: 2,
+      costEst: 0.01,
+    });
+    const held = createTestApp({ hold: true });
+    const cookie = await signup(held, emailAddress());
+    const project = await createProject(held, cookie);
+    await saveKey(held, cookie, project.id, {
+      provider: "anthropic",
+      label: "Claude",
+      secret,
+      isPrimary: true,
+    });
+    const started = await postMessage(
+      held,
+      cookie,
+      project.orchestrator.channelId,
+      "Hold this",
+    );
+    const first = (await started.json()) as { run: { id: string } };
+    const asked = await postMessage(
+      held,
+      cookie,
+      project.orchestrator.channelId,
+      "What is the budget?",
+    );
+    const askedBody = (await asked.json()) as { run: { id?: string } };
+    const qaId = askedBody.run.id;
+    if (!qaId) {
+      throw new Error("missing qa run");
+    }
+    await executeRun(
+      {
+        sql,
+        encryptionKey: testEnv().CREDENTIALS_ENCRYPTION_KEY,
+        llm,
+      },
+      qaId,
+    );
+    expect(seen.length).toBeLessThanOrEqual(3);
+    const plans = await sql<{ n: number }[]>`
+      select count(*)::int as n from plans
+      where agent_id = ${project.orchestrator.agentId}::uuid
+    `;
+    expect(plans[0]?.n).toBe(0);
+    const kinds = await sql<{ kind: string }[]>`
+      select kind from agent_runs where id = ${qaId}::uuid
+    `;
+    expect(kinds[0]?.kind).toBe("qa");
+    const status = await sql<{ status: string }[]>`
+      select status from agents where id = ${project.orchestrator.agentId}::uuid
+    `;
+    expect(status[0]?.status).toBe("working");
+    handler = () => finalResult("Main answer.");
+    await executeRun(
+      {
+        sql,
+        encryptionKey: testEnv().CREDENTIALS_ENCRYPTION_KEY,
+        llm,
+      },
+      first.run.id,
+    );
+    const after = await sql<{ status: string }[]>`
+      select status from agents where id = ${project.orchestrator.agentId}::uuid
+    `;
+    expect(after[0]?.status).toBe("idle");
+  });
+
+  test("an ambiguous request can be queued by intent", async () => {
+    const held = createTestApp({ hold: true });
+    const cookie = await signup(held, emailAddress());
+    const project = await createProject(held, cookie);
+    await saveKey(held, cookie, project.id, {
+      provider: "anthropic",
+      label: "Claude",
+      secret,
+      isPrimary: true,
+    });
+    await postMessage(
+      held,
+      cookie,
+      project.orchestrator.channelId,
+      "Hold this",
+    );
+    const asked = await postMessage(
+      held,
+      cookie,
+      project.orchestrator.channelId,
+      "Add animations?",
+    );
+    const askedBody = (await asked.json()) as {
+      id: string;
+      run: { error?: string };
+    };
+    expect(askedBody.run.error).toBe("intent_required");
+    const chosen = await held.request(
+      `/channels/${project.orchestrator.channelId}/messages/${askedBody.id}/intent`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie },
+        body: JSON.stringify({ intent: "work" }),
+      },
+    );
+    const chosenBody = (await chosen.json()) as { run: { error?: string } };
+    expect(chosenBody.run.error).toBe("queued");
+    const rows = await sql<{ n: number }[]>`
+      select count(*)::int as n
+      from instruction_queue_items
+      where channel_id = ${project.orchestrator.channelId}::uuid
+        and status = 'pending'
+    `;
+    expect(rows[0]?.n).toBe(1);
+  });
+
+  test("the twenty-first queued request is refused", async () => {
+    const held = createTestApp({ hold: true });
+    const cookie = await signup(held, emailAddress());
+    const project = await createProject(held, cookie);
+    await saveKey(held, cookie, project.id, {
+      provider: "anthropic",
+      label: "Claude",
+      secret,
+      isPrimary: true,
+    });
+    await postMessage(
+      held,
+      cookie,
+      project.orchestrator.channelId,
+      "Hold this",
+    );
+    for (let index = 0; index < 20; index += 1) {
+      const queued = await postMessage(
+        held,
+        cookie,
+        project.orchestrator.channelId,
+        `Task ${index}`,
+      );
+      const body = (await queued.json()) as { run: { error?: string } };
+      expect(body.run.error).toBe("queued");
+    }
+    const extra = await postMessage(
+      held,
+      cookie,
+      project.orchestrator.channelId,
+      "Task overflow",
+    );
+    const extraBody = (await extra.json()) as { run: { error?: string } };
+    expect(extraBody.run.error).toBe("queue_full");
+    const rows = await sql<{ n: number }[]>`
+      select count(*)::int as n
+      from instruction_queue_items
+      where channel_id = ${project.orchestrator.channelId}::uuid
+        and status = 'pending'
+    `;
+    expect(rows[0]?.n).toBe(20);
+  });
+
+  test("only the owner can resolve a conflict", async () => {
+    seen.length = 0;
+    let opened = false;
+    handler = () => {
+      if (!opened) {
+        opened = true;
+        return {
+          text: JSON.stringify({
+            status: "conflict",
+            notes: "Two instructions disagree.",
+            conflict: {
+              options: [{ label: "Keep it plain" }, { label: "Add motion" }],
+            },
+          }),
+          tokenIn: 5,
+          tokenOut: 4,
+          costEst: 0.01,
+        };
+      }
+      return finalResult("Following the owner.");
+    };
+    const cookie = await signup(app, emailAddress());
+    const project = await createProject(app, cookie);
+    await saveKey(app, cookie, project.id, {
+      provider: "anthropic",
+      label: "Claude",
+      secret,
+      isPrimary: true,
+    });
+    const posted = await postMessage(
+      app,
+      cookie,
+      project.orchestrator.channelId,
+      "Keep the button plain",
+    );
+    expect(posted.status).toBe(201);
+    await settle();
+    const open = await app.request(
+      `/channels/${project.orchestrator.channelId}/conflicts/open`,
+      { headers: { cookie } },
+    );
+    const openBody = (await open.json()) as {
+      conflict: { id: string; options: { label: string }[] } | null;
+    };
+    expect(openBody.conflict?.options).toHaveLength(2);
+    const conflictId = openBody.conflict?.id ?? "";
+    const blocked = await postMessage(
+      app,
+      cookie,
+      project.orchestrator.channelId,
+      "Change the color",
+    );
+    const blockedBody = (await blocked.json()) as { run: { error?: string } };
+    expect(blockedBody.run.error).toBe("conflict_open");
+    const memberEmail = emailAddress();
+    const memberCookie = await signup(app, memberEmail);
+    const member = await sql<{ id: string }[]>`
+      select id from users where email = ${memberEmail}
+    `;
+    await sql`
+      insert into memberships (project_id, user_id, role)
+      values (${project.id}::uuid, ${member[0]?.id}::uuid, 'member')
+    `;
+    const memberResolve = await app.request(
+      `/conflicts/${conflictId}/resolve`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: memberCookie },
+        body: JSON.stringify({ optionIndex: 0 }),
+      },
+    );
+    expect(memberResolve.status).toBe(403);
+    const stranger = await signup(app, emailAddress());
+    const hidden = await app.request(`/conflicts/${conflictId}/resolve`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: stranger },
+      body: JSON.stringify({ optionIndex: 0 }),
+    });
+    expect(hidden.status).toBe(404);
+    const resolved = await app.request(`/conflicts/${conflictId}/resolve`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ optionIndex: 0 }),
+    });
+    expect(resolved.status).toBe(200);
+    await settle();
+    expect(seen.some((request) => request.user.includes("Keep it plain"))).toBe(
+      true,
+    );
+    const runs = await sql<{ n: number }[]>`
+      select count(*)::int as n from agent_runs
+      where channel_id = ${project.orchestrator.channelId}::uuid
+        and kind = 'main'
+    `;
+    expect(runs[0]?.n).toBe(2);
+    const again = await app.request(`/conflicts/${conflictId}/resolve`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ optionIndex: 0 }),
+    });
+    expect(again.status).toBe(200);
+    await settle();
+    const after = await sql<{ n: number }[]>`
+      select count(*)::int as n from agent_runs
+      where channel_id = ${project.orchestrator.channelId}::uuid
+        and kind = 'main'
+    `;
+    expect(after[0]?.n).toBe(2);
+  });
+
+  test("pause and a cap emit spend updates and a resume drains the queue", async () => {
+    seen.length = 0;
+    handler = () => finalResult("After resume.");
+    const cookie = await signup(app, emailAddress());
+    const paused = await createProject(app, cookie);
+    await saveKey(app, cookie, paused.id, {
+      provider: "anthropic",
+      label: "Claude",
+      secret,
+      isPrimary: true,
+    });
+    const events: string[] = [];
+    const stop = subscribe(paused.orchestrator.channelId, (event) => {
+      events.push(event.event);
+    });
+    const pause = await app.request(`/projects/${paused.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ llmPaused: true }),
+    });
+    expect(pause.status).toBe(200);
+    expect(events).toContain("spend.updated");
+    const pausedPost = await postMessage(
+      app,
+      cookie,
+      paused.orchestrator.channelId,
+      "Paused",
+    );
+    const pausedBody = (await pausedPost.json()) as { run: { error?: string } };
+    expect(pausedBody.run.error).toBe("spend_paused");
+    expect(seen).toHaveLength(0);
+    stop();
+
+    const capped = await createProject(app, cookie);
+    await saveKey(app, cookie, capped.id, {
+      provider: "anthropic",
+      label: "Claude",
+      secret,
+      isPrimary: true,
+    });
+    const capEvents: string[] = [];
+    const stopCap = subscribe(capped.orchestrator.channelId, (event) => {
+      capEvents.push(event.event);
+    });
+    const cap = await app.request(`/projects/${capped.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ spendCap: 0 }),
+    });
+    expect(cap.status).toBe(200);
+    expect(capEvents).toContain("spend.updated");
+    const cappedPost = await postMessage(
+      app,
+      cookie,
+      capped.orchestrator.channelId,
+      "Capped",
+    );
+    const cappedBody = (await cappedPost.json()) as { run: { error?: string } };
+    expect(cappedBody.run.error).toBe("spend_cap");
+    expect(seen).toHaveLength(0);
+    stopCap();
+
+    const held = createTestApp({ hold: true });
+    const heldCookie = await signup(held, emailAddress());
+    const heldProject = await createProject(held, heldCookie);
+    await saveKey(held, heldCookie, heldProject.id, {
+      provider: "anthropic",
+      label: "Claude",
+      secret,
+      isPrimary: true,
+    });
+    const started = await postMessage(
+      held,
+      heldCookie,
+      heldProject.orchestrator.channelId,
+      "Hold this",
+    );
+    const first = (await started.json()) as { run: { id: string } };
+    const queued = await postMessage(
+      held,
+      heldCookie,
+      heldProject.orchestrator.channelId,
+      "Add a chair",
+    );
+    expect(
+      ((await queued.json()) as { run: { error?: string } }).run.error,
+    ).toBe("queued");
+    await held.request(`/projects/${heldProject.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", cookie: heldCookie },
+      body: JSON.stringify({ llmPaused: true }),
+    });
+    await executeRun(
+      {
+        sql,
+        encryptionKey: testEnv().CREDENTIALS_ENCRYPTION_KEY,
+        llm,
+      },
+      first.run.id,
+    );
+    expect(seen).toHaveLength(0);
+    await held.request(`/projects/${heldProject.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", cookie: heldCookie },
+      body: JSON.stringify({ llmPaused: false }),
+    });
+    const pending = await sql<{ id: string }[]>`
+      select id from agent_runs
+      where channel_id = ${heldProject.orchestrator.channelId}::uuid
+        and status = 'pending'
+    `;
+    expect(pending[0]?.id).toBeTruthy();
+    await executeRun(
+      {
+        sql,
+        encryptionKey: testEnv().CREDENTIALS_ENCRYPTION_KEY,
+        llm,
+      },
+      pending[0]?.id ?? "",
+    );
+    expect(seen.at(-1)?.user.includes("Current request:\nAdd a chair")).toBe(
+      true,
+    );
+    const completed = await sql<{ status: string }[]>`
+      select status from instruction_queue_items
+      where channel_id = ${heldProject.orchestrator.channelId}::uuid
+    `;
+    expect(completed[0]?.status).toBe("completed");
   });
 });

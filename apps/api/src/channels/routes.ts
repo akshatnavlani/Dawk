@@ -14,6 +14,7 @@ const MAX_IDEMPOTENCY_KEY = 200;
 
 const postMessageSchema = z.object({
   body: z.string().trim().min(1).max(MAX_BODY),
+  intent: z.enum(["work", "question"]).optional(),
 });
 
 type MessageRow = {
@@ -116,7 +117,16 @@ async function readJson(c: Context): Promise<unknown> {
 export function createChannelRoutes(deps: {
   sql: Sql;
   sessionSecret: string;
-  startRun: (channelId: string, userId: string) => Promise<RunBody>;
+  startRun: (
+    channelId: string,
+    userId: string,
+    message: { id: string; body: string; intent?: "work" | "question" },
+  ) => Promise<RunBody>;
+  applyIntent: (
+    channelId: string,
+    userId: string,
+    message: { id: string; body: string; intent: "work" | "question" },
+  ) => Promise<RunBody>;
 }): Hono {
   const app = new Hono();
 
@@ -273,7 +283,11 @@ export function createChannelRoutes(deps: {
         authorUserId: view.authorUserId,
         createdAt: view.createdAt,
       });
-      const run = await deps.startRun(channelId.data, user.id);
+      const run = await deps.startRun(channelId.data, user.id, {
+        id: message.id,
+        body: message.body,
+        intent: parsed.data.intent,
+      });
       return c.json({ ...view, run }, 201);
     } catch (error) {
       const code =
@@ -289,6 +303,121 @@ export function createChannelRoutes(deps: {
       }
       return jsonError(c, 409, "idempotency_conflict");
     }
+  });
+
+  app.post("/channels/:id/messages/:messageId/intent", async (c) => {
+    const user = await requireUser(c, deps.sql, deps.sessionSecret);
+    if (isResponse(user)) {
+      return user;
+    }
+    const channelId = z.string().uuid().safeParse(c.req.param("id"));
+    const messageId = z.string().uuid().safeParse(c.req.param("messageId"));
+    if (!channelId.success || !messageId.success) {
+      return jsonError(c, 404, "not_found");
+    }
+    if (!(await memberChannel(deps.sql, channelId.data, user.id))) {
+      return jsonError(c, 404, "not_found");
+    }
+    const parsed = z
+      .object({ intent: z.enum(["work", "question"]) })
+      .safeParse(await readJson(c));
+    if (!parsed.success) {
+      return jsonError(c, 400, "invalid_request");
+    }
+    const rows = await deps.sql<
+      {
+        id: string;
+        body: string;
+        author_user_id: string | null;
+        author_kind: string;
+      }[]
+    >`
+      select id, body, author_user_id, author_kind
+      from messages
+      where id = ${messageId.data}::uuid
+        and channel_id = ${channelId.data}::uuid
+    `;
+    const message = rows[0];
+    if (message?.author_kind !== "user" || message.author_user_id !== user.id) {
+      return jsonError(c, 404, "not_found");
+    }
+    const run = await deps.applyIntent(channelId.data, user.id, {
+      id: message.id,
+      body: message.body,
+      intent: parsed.data.intent,
+    });
+    return c.json({ run });
+  });
+
+  app.get("/channels/:id/queue", async (c) => {
+    const user = await requireUser(c, deps.sql, deps.sessionSecret);
+    if (isResponse(user)) {
+      return user;
+    }
+    const channelId = z.string().uuid().safeParse(c.req.param("id"));
+    if (!channelId.success) {
+      return jsonError(c, 404, "not_found");
+    }
+    if (!(await memberChannel(deps.sql, channelId.data, user.id))) {
+      return jsonError(c, 404, "not_found");
+    }
+    const rows = await deps.sql<
+      { id: string; message_id: string; body: string; created_at: Date }[]
+    >`
+      select
+        instruction_queue_items.id,
+        instruction_queue_items.message_id,
+        messages.body,
+        instruction_queue_items.created_at
+      from instruction_queue_items
+      join messages on messages.id = instruction_queue_items.message_id
+      where instruction_queue_items.channel_id = ${channelId.data}::uuid
+        and instruction_queue_items.status = 'pending'
+      order by instruction_queue_items.created_at asc
+    `;
+    return c.json({
+      items: rows.map((row) => ({
+        id: row.id,
+        messageId: row.message_id,
+        body: row.body,
+        createdAt: row.created_at.toISOString(),
+      })),
+    });
+  });
+
+  app.get("/channels/:id/conflicts/open", async (c) => {
+    const user = await requireUser(c, deps.sql, deps.sessionSecret);
+    if (isResponse(user)) {
+      return user;
+    }
+    const channelId = z.string().uuid().safeParse(c.req.param("id"));
+    if (!channelId.success) {
+      return jsonError(c, 404, "not_found");
+    }
+    if (!(await memberChannel(deps.sql, channelId.data, user.id))) {
+      return jsonError(c, 404, "not_found");
+    }
+    const rows = await deps.sql<
+      { id: string; options: unknown; status: string }[]
+    >`
+      select id, options, status
+      from conflicts
+      where channel_id = ${channelId.data}::uuid
+        and status = 'open'
+      limit 1
+    `;
+    const row = rows[0];
+    if (!row) {
+      return c.json({ conflict: null });
+    }
+    return c.json({
+      conflict: {
+        id: row.id,
+        channelId: channelId.data,
+        status: row.status,
+        options: row.options,
+      },
+    });
   });
 
   app.get("/channels/:id/events", async (c) => {

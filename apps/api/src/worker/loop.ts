@@ -11,21 +11,39 @@ import {
 } from "./provider";
 
 export const MAX_MAIN_ITERATIONS = 8;
+export const QA_MAX_ITERATIONS = 3;
 const MESSAGE_WINDOW = 20;
+const QA_MESSAGE_WINDOW = 5;
+const QUEUE_LIMIT = 20;
+const runRequests = new Map<string, string>();
+const changeRequest =
+  /^(please\s+)?(add|change|update|remove|delete|fix|build|implement|make)\b/i;
 
 const planBodySchema = z.object({
   summary: z.string().trim().min(1).max(2000),
   steps: z.array(z.string().trim().min(1).max(500)).min(1).max(20),
 });
 
+const conflictBodySchema = z.object({
+  options: z
+    .array(
+      z.object({
+        label: z.string().trim().min(1).max(500),
+      }),
+    )
+    .min(2)
+    .max(8),
+});
+
 const turnSchema = z
   .object({
-    status: z.enum(["working", "final", "plan", "decision"]),
+    status: z.enum(["working", "final", "plan", "decision", "conflict"]),
     notes: z.string().trim().min(1).max(4000),
     answer: z.string().trim().min(1).max(8000).optional(),
     summary: z.string().trim().min(1).max(2000).optional(),
     plan: planBodySchema.optional(),
     proposal: z.string().trim().min(1).max(2000).optional(),
+    conflict: conflictBodySchema.optional(),
   })
   .superRefine((value, ctx) => {
     if (value.status === "final") {
@@ -50,6 +68,13 @@ const turnSchema = z
         message: "proposal",
       });
     }
+    if (value.status === "conflict" && !value.conflict) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["conflict"],
+        message: "conflict",
+      });
+    }
   });
 
 type Turn = z.infer<typeof turnSchema>;
@@ -57,7 +82,20 @@ type Turn = z.infer<typeof turnSchema>;
 export type RunBody =
   | { id: string }
   | { id: string; error: string }
-  | { error: "rate_limited" | "agent_busy" | "awaiting_approval" };
+  | {
+      error:
+        | "rate_limited"
+        | "agent_busy"
+        | "awaiting_approval"
+        | "queued"
+        | "queue_full"
+        | "intent_required"
+        | "qa_busy"
+        | "conflict_open";
+    };
+
+type Intent = "work" | "question";
+type RunKind = "main" | "qa";
 
 export type EnqueueResult = {
   kind: "started" | "failed" | "skipped";
@@ -120,12 +158,14 @@ function systemPrompt(skill: string): string {
     skill,
     "",
     "Reply with one JSON object and no markdown.",
-    'Keys: status ("working", "final", "plan", or "decision"), notes (string).',
+    'Keys: status ("working", "final", "plan", "decision", or "conflict"), notes (string).',
     "When status is final, also include answer and summary.",
     "When status is plan, also include plan with summary and steps.",
     "When status is decision, also include proposal.",
+    "When status is conflict, also include conflict with at least two options, each with a label.",
     "A plan is not approved until the owner says so.",
     "A pending decision is not a fact until the owner accepts it.",
+    "A conflict waits until the owner chooses.",
     "status working is a progress note. status final is the channel reply.",
   ].join("\n");
 }
@@ -155,6 +195,35 @@ function isUniqueViolation(error: unknown): boolean {
 
 function asBuffer(value: Buffer | Uint8Array): Buffer {
   return Buffer.isBuffer(value) ? value : Buffer.from(value);
+}
+
+function classifyBody(body: string, intent?: Intent): Intent | "ambiguous" {
+  if (intent) {
+    return intent;
+  }
+  const trimmed = body.trim();
+  const question = trimmed.endsWith("?");
+  const change = changeRequest.test(trimmed);
+  if (question && change) {
+    return "ambiguous";
+  }
+  if (question) {
+    return "question";
+  }
+  return "work";
+}
+
+function skipped(
+  error:
+    | "rate_limited"
+    | "agent_busy"
+    | "queued"
+    | "queue_full"
+    | "intent_required"
+    | "qa_busy"
+    | "conflict_open",
+): EnqueueResult {
+  return { kind: "skipped", run: { error } };
 }
 
 async function loadContext(
@@ -250,6 +319,7 @@ async function failNewRun(
   sql: Sql,
   context: ChannelContext,
   reason: string,
+  kind: RunKind = "main",
 ): Promise<string> {
   const runId = await sql.begin(async (tx) => {
     const rows = await tx<{ id: string }[]>`
@@ -259,7 +329,7 @@ async function failNewRun(
         ${context.projectId}::uuid,
         ${context.channelId}::uuid,
         ${context.agentId}::uuid,
-        'main',
+        ${kind},
         'failed'
       )
       returning id
@@ -281,9 +351,262 @@ async function failNewRun(
     return id;
   });
   publish(context.channelId, "run.failed", { runId, reason });
+  if (reason === "spend_paused" || reason === "spend_cap") {
+    await publishSpend(sql, context.projectId);
+  }
   return runId;
 }
 
+async function mainIsActive(
+  sql: Sql,
+  agentId: string,
+  exceptRunId?: string,
+): Promise<boolean> {
+  const rows = await sql<{ id: string }[]>`
+    select id
+    from agent_runs
+    where agent_id = ${agentId}::uuid
+      and kind = 'main'
+      and status in ('pending', 'running')
+      and id is distinct from ${exceptRunId ?? null}::uuid
+    limit 1
+  `;
+  return Boolean(rows[0]);
+}
+
+async function qaIsActive(sql: Sql, agentId: string): Promise<boolean> {
+  const rows = await sql<{ id: string }[]>`
+    select id
+    from agent_runs
+    where agent_id = ${agentId}::uuid
+      and kind = 'qa'
+      and status in ('pending', 'running')
+    limit 1
+  `;
+  return Boolean(rows[0]);
+}
+
+async function openConflict(
+  sql: Sql,
+  channelId: string,
+): Promise<{ id: string } | undefined> {
+  const rows = await sql<{ id: string }[]>`
+    select id
+    from conflicts
+    where channel_id = ${channelId}::uuid
+      and status = 'open'
+    limit 1
+  `;
+  return rows[0];
+}
+
+async function releaseAgent(
+  sql: Sql,
+  context: ChannelContext,
+  runId: string,
+): Promise<void> {
+  const runs = await sql<{ kind: string }[]>`
+    select kind from agent_runs where id = ${runId}::uuid
+  `;
+  const kind = runs[0]?.kind ?? "main";
+  const agents = await sql<{ status: string }[]>`
+    select status from agents where id = ${context.agentId}::uuid
+  `;
+  const busy =
+    kind === "qa" &&
+    ((await mainIsActive(sql, context.agentId, runId)) ||
+      agents[0]?.status === "awaiting_approval");
+  if (busy) {
+    return;
+  }
+  await sql`
+    update agents
+    set status = 'idle', updated_at = now()
+    where id = ${context.agentId}::uuid
+  `;
+}
+
+async function readyForModel(
+  deps: WorkerDb | ExecuteDeps,
+  context: ChannelContext,
+  kind: RunKind,
+): Promise<EnqueueResult | null> {
+  if (!context.skillPack) {
+    const id = await failNewRun(deps.sql, context, "missing_skill", kind);
+    return { kind: "failed", run: { id, error: "missing_skill" } };
+  }
+  const blocked = spendBlock(
+    context.llmPaused,
+    context.spendCap,
+    context.spendUsed,
+  );
+  if (blocked) {
+    const id = await failNewRun(deps.sql, context, blocked, kind);
+    return { kind: "failed", run: { id, error: blocked } };
+  }
+  const credentials = await listCandidates(
+    deps.sql,
+    context.projectId,
+    context.credentialId,
+    context.modelId,
+  );
+  if (credentials.active === 0) {
+    const id = await failNewRun(deps.sql, context, "missing_credential", kind);
+    return { kind: "failed", run: { id, error: "missing_credential" } };
+  }
+  if (credentials.usable.length === 0) {
+    const id = await failNewRun(deps.sql, context, "provider_failed", kind);
+    return { kind: "failed", run: { id, error: "provider_failed" } };
+  }
+  return null;
+}
+
+async function insertRun(
+  sql: Sql,
+  context: ChannelContext,
+  kind: RunKind,
+): Promise<string> {
+  return sql.begin(async (tx) => {
+    const rows = await tx<{ id: string }[]>`
+      insert into agent_runs (
+        project_id, channel_id, agent_id, kind, status
+      ) values (
+        ${context.projectId}::uuid,
+        ${context.channelId}::uuid,
+        ${context.agentId}::uuid,
+        ${kind},
+        'pending'
+      )
+      returning id
+    `;
+    const runId = rows[0]?.id;
+    if (!runId) {
+      throw new Error("run insert failed");
+    }
+    if (kind === "main") {
+      await tx`
+        update agents
+        set status = 'working', updated_at = now()
+        where id = ${context.agentId}::uuid
+      `;
+    } else {
+      await tx`
+        update agents
+        set status = 'working', updated_at = now()
+        where id = ${context.agentId}::uuid
+          and status = 'idle'
+      `;
+    }
+    return runId;
+  });
+}
+
+async function queueMessage(
+  sql: Sql,
+  channelId: string,
+  messageId: string,
+): Promise<EnqueueResult> {
+  const existing = await sql<{ id: string }[]>`
+    select id
+    from instruction_queue_items
+    where message_id = ${messageId}::uuid
+  `;
+  if (existing[0]) {
+    return skipped("queued");
+  }
+  const counts = await sql<{ n: number }[]>`
+    select count(*)::int as n
+    from instruction_queue_items
+    where channel_id = ${channelId}::uuid
+      and status = 'pending'
+  `;
+  if ((counts[0]?.n ?? 0) >= QUEUE_LIMIT) {
+    return skipped("queue_full");
+  }
+  try {
+    await sql`
+      insert into instruction_queue_items (channel_id, message_id, status)
+      values (${channelId}::uuid, ${messageId}::uuid, 'pending')
+    `;
+  } catch (error) {
+    if (!isUniqueViolation(error)) {
+      throw error;
+    }
+  }
+  return skipped("queued");
+}
+
+export async function enqueueRun(
+  deps: WorkerDb,
+  input: {
+    channelId: string;
+    userId: string;
+    messageId: string;
+    body: string;
+    intent?: Intent;
+    consumeLimit: boolean;
+  },
+): Promise<EnqueueResult> {
+  const context = await loadContext(deps.sql, input.channelId);
+  if (!context) {
+    throw new Error("channel missing");
+  }
+  if (
+    input.consumeLimit &&
+    !deps.allow(`run:${context.projectId}:${input.userId}`)
+  ) {
+    return skipped("rate_limited");
+  }
+  const choice = classifyBody(input.body, input.intent);
+  const conflict = await openConflict(deps.sql, context.channelId);
+  const busy =
+    (await mainIsActive(deps.sql, context.agentId)) ||
+    context.agentStatus === "awaiting_approval";
+  if (conflict && choice !== "question") {
+    if (choice === "ambiguous") {
+      return skipped("intent_required");
+    }
+    return skipped("conflict_open");
+  }
+  if (!busy && !conflict) {
+    const blocked = await readyForModel(deps, context, "main");
+    if (blocked) {
+      return blocked;
+    }
+    try {
+      const id = await insertRun(deps.sql, context, "main");
+      return { kind: "started", run: { id } };
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        return skipped("agent_busy");
+      }
+      throw error;
+    }
+  }
+  if (choice === "ambiguous") {
+    return skipped("intent_required");
+  }
+  if (choice === "question") {
+    if (await qaIsActive(deps.sql, context.agentId)) {
+      return skipped("qa_busy");
+    }
+    const blocked = await readyForModel(deps, context, "qa");
+    if (blocked) {
+      return blocked;
+    }
+    try {
+      const id = await insertRun(deps.sql, context, "qa");
+      runRequests.set(id, input.body);
+      return { kind: "started", run: { id } };
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        return skipped("qa_busy");
+      }
+      throw error;
+    }
+  }
+  return queueMessage(deps.sql, context.channelId, input.messageId);
+}
 async function markFailed(
   sql: Sql,
   context: ChannelContext,
@@ -312,98 +635,11 @@ async function markFailed(
         ${tx.json({ reason })}
       )
     `;
-    await tx`
-      update agents
-      set status = 'idle', updated_at = now()
-      where id = ${context.agentId}::uuid
-    `;
   });
+  await releaseAgent(sql, context, runId);
   publish(context.channelId, "run.failed", { runId, reason });
-}
-
-export async function enqueueRun(
-  deps: WorkerDb,
-  input: { channelId: string; userId: string },
-): Promise<EnqueueResult> {
-  const context = await loadContext(deps.sql, input.channelId);
-  if (!context) {
-    throw new Error("channel missing");
-  }
-  if (context.agentStatus === "awaiting_approval") {
-    return { kind: "skipped", run: { error: "awaiting_approval" } };
-  }
-  if (!deps.allow(`run:${context.projectId}:${input.userId}`)) {
-    return { kind: "skipped", run: { error: "rate_limited" } };
-  }
-  const active = await deps.sql<{ id: string }[]>`
-    select id
-    from agent_runs
-    where agent_id = ${context.agentId}::uuid
-      and kind = 'main'
-      and status in ('pending', 'running')
-    limit 1
-  `;
-  if (active[0]) {
-    return { kind: "skipped", run: { error: "agent_busy" } };
-  }
-  if (!context.skillPack) {
-    const id = await failNewRun(deps.sql, context, "missing_skill");
-    return { kind: "failed", run: { id, error: "missing_skill" } };
-  }
-  const blocked = spendBlock(
-    context.llmPaused,
-    context.spendCap,
-    context.spendUsed,
-  );
-  if (blocked) {
-    const id = await failNewRun(deps.sql, context, blocked);
-    return { kind: "failed", run: { id, error: blocked } };
-  }
-  const credentials = await listCandidates(
-    deps.sql,
-    context.projectId,
-    context.credentialId,
-    context.modelId,
-  );
-  if (credentials.active === 0) {
-    const id = await failNewRun(deps.sql, context, "missing_credential");
-    return { kind: "failed", run: { id, error: "missing_credential" } };
-  }
-  if (credentials.usable.length === 0) {
-    const id = await failNewRun(deps.sql, context, "provider_failed");
-    return { kind: "failed", run: { id, error: "provider_failed" } };
-  }
-  try {
-    const id = await deps.sql.begin(async (tx) => {
-      const rows = await tx<{ id: string }[]>`
-        insert into agent_runs (
-          project_id, channel_id, agent_id, kind, status
-        ) values (
-          ${context.projectId}::uuid,
-          ${context.channelId}::uuid,
-          ${context.agentId}::uuid,
-          'main',
-          'pending'
-        )
-        returning id
-      `;
-      const runId = rows[0]?.id;
-      if (!runId) {
-        throw new Error("run insert failed");
-      }
-      await tx`
-        update agents
-        set status = 'working', updated_at = now()
-        where id = ${context.agentId}::uuid
-      `;
-      return runId;
-    });
-    return { kind: "started", run: { id } };
-  } catch (error) {
-    if (isUniqueViolation(error)) {
-      return { kind: "skipped", run: { error: "agent_busy" } };
-    }
-    throw error;
+  if (reason === "spend_paused" || reason === "spend_cap") {
+    await publishSpend(sql, context.projectId);
   }
 }
 
@@ -496,6 +732,51 @@ async function buildUserPrompt(
     noteLines.length > 0
       ? noteLines.map((note) => `- ${note}`).join("\n")
       : "(none)",
+    "Current request:",
+    runRequests.get(runId) ?? "(none)",
+  ].join("\n");
+}
+
+async function buildQaPrompt(
+  sql: Sql,
+  context: ChannelContext,
+  runId: string,
+): Promise<string> {
+  const decisions = await sql<{ proposal: string }[]>`
+    select proposal
+    from decisions
+    where project_id = ${context.projectId}::uuid
+      and status = 'accepted'
+    order by created_at asc
+  `;
+  const plan = await sql<{ status: string }[]>`
+    select status
+    from plans
+    where agent_id = ${context.agentId}::uuid
+    order by updated_at desc
+    limit 1
+  `;
+  const messages = await sql<{ author_kind: string; body: string }[]>`
+    select author_kind, body
+    from messages
+    where channel_id = ${context.channelId}::uuid
+    order by created_at desc, id desc
+    limit ${QA_MESSAGE_WINDOW}
+  `;
+  const recent = messages.reverse();
+  return [
+    "This is a side question. Do not change the plan, the Brief, or a conflict.",
+    "Reply with status working or final only.",
+    "Current plan (read only):",
+    plan[0]?.status ?? "(none)",
+    "Accepted decisions:",
+    decisions.length > 0
+      ? decisions.map((row) => `- ${row.proposal}`).join("\n")
+      : "(none)",
+    "Recent channel messages:",
+    ...recent.map((row) => `channel_message ${row.author_kind}: ${row.body}`),
+    "Question:",
+    runRequests.get(runId) ?? "(none)",
   ].join("\n");
 }
 
@@ -504,6 +785,7 @@ async function callModel(
   context: ChannelContext,
   user: string,
   calls: { n: number },
+  maxCalls: number,
 ): Promise<CallSuccess | null> {
   const { usable } = await listCandidates(
     deps.sql,
@@ -513,7 +795,7 @@ async function callModel(
   );
   const retried = new Set<string>();
   for (const credential of usable) {
-    if (calls.n >= MAX_MAIN_ITERATIONS) {
+    if (calls.n >= maxCalls) {
       return null;
     }
     let apiKey: string;
@@ -555,7 +837,7 @@ async function callModel(
       if (
         kind === "transient" &&
         !retried.has(credential.id) &&
-        calls.n < MAX_MAIN_ITERATIONS
+        calls.n < maxCalls
       ) {
         retried.add(credential.id);
         try {
@@ -582,6 +864,7 @@ async function recordTurn(
   iteration: number,
   turn: Turn,
   outcome: CallSuccess,
+  runKind: RunKind,
 ): Promise<void> {
   const saved = await deps.sql.begin(async (tx) => {
     const next = await tx<{ n: number }[]>`
@@ -627,6 +910,9 @@ async function recordTurn(
       | { id: string; body: { summary: string; steps: string[] } }
       | undefined;
     let decisionEvent: { id: string; proposal: string } | undefined;
+    let conflictEvent:
+      | { id: string; options: Record<string, unknown>[] }
+      | undefined;
     if (turn.status === "decision" && turn.proposal) {
       const decisions = await tx<{ id: string }[]>`
         insert into decisions (
@@ -668,11 +954,6 @@ async function recordTurn(
         update agent_runs
         set status = 'succeeded', updated_at = now()
         where id = ${runId}::uuid
-      `;
-      await tx`
-        update agents
-        set status = 'idle', updated_at = now()
-        where id = ${context.agentId}::uuid
       `;
     }
     if (turn.status === "plan" && turn.plan) {
@@ -734,25 +1015,99 @@ async function recordTurn(
         returning id, body, created_at
       `;
       message = messages[0];
-      await tx`
-        insert into agent_summaries (project_id, agent_id, summary)
-        values (
-          ${context.projectId}::uuid,
-          ${context.agentId}::uuid,
-          ${turn.summary}
-        )
-        on conflict (agent_id) where agent_id is not null
-        do update set summary = excluded.summary, updated_at = now()
-      `;
+      if (runKind === "main" && turn.summary) {
+        await tx`
+          insert into agent_summaries (project_id, agent_id, summary)
+          values (
+            ${context.projectId}::uuid,
+            ${context.agentId}::uuid,
+            ${turn.summary}
+          )
+          on conflict (agent_id) where agent_id is not null
+          do update set summary = excluded.summary, updated_at = now()
+        `;
+      }
       await tx`
         update agent_runs
         set status = 'succeeded', updated_at = now()
         where id = ${runId}::uuid
       `;
+    }
+    if (turn.status === "conflict" && turn.conflict && runKind === "main") {
+      const people = await tx<
+        {
+          id: string;
+          body: string;
+          author_user_id: string;
+          role: string | null;
+        }[]
+      >`
+        select
+          messages.id,
+          messages.body,
+          messages.author_user_id,
+          memberships.role
+        from messages
+        join channels on channels.id = messages.channel_id
+        left join memberships
+          on memberships.project_id = channels.project_id
+          and memberships.user_id = messages.author_user_id
+        where messages.channel_id = ${context.channelId}::uuid
+          and messages.author_kind = 'user'
+        order by messages.created_at desc, messages.id desc
+        limit 2
+      `;
+      const latest = [...people].reverse();
+      const options = turn.conflict.options.map((option, index) => {
+        const person = latest[index];
+        return {
+          label: option.label,
+          ...(person
+            ? {
+                messageId: person.id,
+                userId: person.author_user_id,
+                role: person.role ?? "member",
+                body: person.body,
+              }
+            : {}),
+        };
+      });
+      const inserted = await tx<{ id: string }[]>`
+        insert into conflicts (channel_id, options, status)
+        values (${context.channelId}::uuid, ${tx.json(options)}, 'open')
+        returning id
+      `;
+      const conflictId = inserted[0]?.id;
+      if (!conflictId) {
+        throw new Error("conflict insert failed");
+      }
+      conflictEvent = { id: conflictId, options };
+      const notice = [
+        "A conflict needs the owner.",
+        ...options.map((option, index) => {
+          const who = option.role === "owner" ? "Owner" : "Member";
+          const text =
+            "body" in option && option.body ? option.body : option.label;
+          return `${index + 1}. ${who}: ${text}`;
+        }),
+      ].join("\n");
+      const messages = await tx<
+        { id: string; body: string; created_at: Date }[]
+      >`
+        insert into messages (channel_id, author_kind, body, run_id)
+        values (
+          ${context.channelId}::uuid,
+          'system',
+          ${notice},
+          ${runId}::uuid
+        )
+        returning id, body, created_at
+      `;
+      message = messages[0];
       await tx`
-        update agents
-        set status = 'idle', updated_at = now()
-        where id = ${context.agentId}::uuid
+        update agent_runs
+        set status = 'succeeded', updated_at = now()
+        where id = ${runId}::uuid
       `;
     }
     const totals = await tx<
@@ -767,8 +1122,24 @@ async function recordTurn(
       from agent_runs
       where id = ${runId}::uuid
     `;
-    return { stepIndex, message, totals: totals[0], planEvent, decisionEvent };
+    return {
+      stepIndex,
+      message,
+      totals: totals[0],
+      planEvent,
+      decisionEvent,
+      conflictEvent,
+    };
   });
+
+  if (
+    turn.status === "final" ||
+    turn.status === "decision" ||
+    turn.status === "conflict"
+  ) {
+    await releaseAgent(deps.sql, context, runId);
+  }
+  await publishSpend(deps.sql, context.projectId);
 
   publish(context.channelId, "run.step", {
     runId,
@@ -797,11 +1168,19 @@ async function recordTurn(
       proposal: saved.decisionEvent.proposal,
     });
   }
+  if (saved.conflictEvent) {
+    publish(context.channelId, "conflict.opened", {
+      conflictId: saved.conflictEvent.id,
+      channelId: context.channelId,
+      status: "open",
+      options: saved.conflictEvent.options,
+    });
+  }
   if (saved.message) {
     publishMessageCreated(context.channelId, {
       id: saved.message.id,
       body: saved.message.body,
-      authorKind: "agent",
+      authorKind: saved.conflictEvent ? "system" : "agent",
       authorUserId: null,
       createdAt: saved.message.created_at.toISOString(),
     });
@@ -816,62 +1195,78 @@ async function recordTurn(
   }
 }
 
+function turnAllowed(kind: RunKind, turn: Turn): boolean {
+  if (kind === "main") {
+    return true;
+  }
+  return turn.status === "working" || turn.status === "final";
+}
+
 export async function executeRun(
   deps: ExecuteDeps,
   runId: string,
 ): Promise<void> {
   const claimed = await deps.sql<
-    { id: string; channel_id: string; project_id: string; agent_id: string }[]
+    { id: string; channel_id: string; kind: string }[]
   >`
     update agent_runs
     set status = 'running', updated_at = now()
     where id = ${runId}::uuid
       and status = 'pending'
-    returning id, channel_id, project_id, agent_id
+    returning id, channel_id, kind
   `;
   const claim = claimed[0];
   if (!claim) {
     return;
   }
+  const runKind: RunKind = claim.kind === "qa" ? "qa" : "main";
+  const maxCalls = runKind === "qa" ? QA_MAX_ITERATIONS : MAX_MAIN_ITERATIONS;
   const context = await loadContext(deps.sql, claim.channel_id);
-  if (!context?.skillPack) {
-    if (context) {
-      await markFailed(deps.sql, context, runId, "missing_skill", 1);
-    }
-    return;
-  }
-  publish(context.channelId, "run.started", {
-    runId,
-    agentId: context.agentId,
-    status: "running",
-  });
-  const calls = { n: 0 };
-  let iteration = 0;
+  let drain = false;
   try {
-    while (calls.n < MAX_MAIN_ITERATIONS) {
+    if (!context?.skillPack) {
+      if (context) {
+        await markFailed(deps.sql, context, runId, "missing_skill", 1);
+        drain = runKind === "main";
+      }
+      return;
+    }
+    drain = runKind === "main";
+    publish(context.channelId, "run.started", {
+      runId,
+      agentId: context.agentId,
+      status: "running",
+    });
+    const calls = { n: 0 };
+    let iteration = 0;
+    while (calls.n < maxCalls) {
       const blocked = await currentGate(deps.sql, context.projectId);
       if (blocked) {
         await markFailed(deps.sql, context, runId, blocked, iteration);
         return;
       }
       iteration += 1;
-      const user = await buildUserPrompt(deps.sql, context, runId);
-      let outcome = await callModel(deps, context, user, calls);
+      const user =
+        runKind === "qa"
+          ? await buildQaPrompt(deps.sql, context, runId)
+          : await buildUserPrompt(deps.sql, context, runId);
+      let outcome = await callModel(deps, context, user, calls, maxCalls);
       if (!outcome) {
         await markFailed(
           deps.sql,
           context,
           runId,
-          calls.n >= MAX_MAIN_ITERATIONS
-            ? "iteration_limit"
-            : "provider_failed",
+          calls.n >= maxCalls ? "iteration_limit" : "provider_failed",
           iteration,
         );
         return;
       }
       let turn = parseTurn(outcome.text);
+      if (turn && !turnAllowed(runKind, turn)) {
+        turn = null;
+      }
       if (!turn) {
-        if (calls.n >= MAX_MAIN_ITERATIONS) {
+        if (calls.n >= maxCalls) {
           await markFailed(
             deps.sql,
             context,
@@ -881,20 +1276,21 @@ export async function executeRun(
           );
           return;
         }
-        outcome = await callModel(deps, context, user, calls);
+        outcome = await callModel(deps, context, user, calls, maxCalls);
         if (!outcome) {
           await markFailed(
             deps.sql,
             context,
             runId,
-            calls.n >= MAX_MAIN_ITERATIONS
-              ? "iteration_limit"
-              : "provider_failed",
+            calls.n >= maxCalls ? "iteration_limit" : "provider_failed",
             iteration,
           );
           return;
         }
         turn = parseTurn(outcome.text);
+        if (turn && !turnAllowed(runKind, turn)) {
+          turn = null;
+        }
         if (!turn) {
           await markFailed(
             deps.sql,
@@ -906,11 +1302,12 @@ export async function executeRun(
           return;
         }
       }
-      await recordTurn(deps, context, runId, iteration, turn, outcome);
+      await recordTurn(deps, context, runId, iteration, turn, outcome, runKind);
       if (
         turn.status === "final" ||
         turn.status === "plan" ||
-        turn.status === "decision"
+        turn.status === "decision" ||
+        turn.status === "conflict"
       ) {
         return;
       }
@@ -918,13 +1315,23 @@ export async function executeRun(
     await markFailed(deps.sql, context, runId, "iteration_limit", iteration);
   } catch {
     console.error("agent run failed");
-    await markFailed(deps.sql, context, runId, "provider_failed", iteration);
+    if (context) {
+      await markFailed(deps.sql, context, runId, "provider_failed", 1);
+    }
+  } finally {
+    if (drain && context) {
+      const next = await drainQueue(deps, context.channelId);
+      if (next) {
+        await executeRun(deps, next);
+      }
+    }
   }
 }
 
 export async function startContinuation(
   deps: ExecuteDeps,
   agentId: string,
+  requestText?: string,
 ): Promise<EnqueueResult> {
   const channels = await deps.sql<{ id: string }[]>`
     select id from channels where agent_id = ${agentId}::uuid
@@ -937,29 +1344,69 @@ export async function startContinuation(
   if (!context) {
     throw new Error("channel missing");
   }
-  const active = await deps.sql<{ id: string }[]>`
-    select id
-    from agent_runs
-    where agent_id = ${context.agentId}::uuid
-      and kind = 'main'
-      and status in ('pending', 'running')
-    limit 1
-  `;
-  if (active[0]) {
-    return { kind: "skipped", run: { error: "agent_busy" } };
+  if (await mainIsActive(deps.sql, context.agentId)) {
+    return skipped("agent_busy");
   }
-  if (!context.skillPack) {
-    const id = await failNewRun(deps.sql, context, "missing_skill");
-    return { kind: "failed", run: { id, error: "missing_skill" } };
-  }
-  const blocked = spendBlock(
-    context.llmPaused,
-    context.spendCap,
-    context.spendUsed,
-  );
+  const blocked = await readyForModel(deps, context, "main");
   if (blocked) {
-    const id = await failNewRun(deps.sql, context, blocked);
-    return { kind: "failed", run: { id, error: blocked } };
+    return blocked;
+  }
+  try {
+    const id = await insertRun(deps.sql, context, "main");
+    if (requestText) {
+      runRequests.set(id, requestText);
+    }
+    return { kind: "started", run: { id } };
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      return skipped("agent_busy");
+    }
+    throw error;
+  }
+}
+
+export async function publishSpend(sql: Sql, projectId: string): Promise<void> {
+  const projects = await sql<
+    { spend_cap: string | null; spend_used: string; llm_paused: boolean }[]
+  >`
+    select spend_cap::text as spend_cap, spend_used::text as spend_used, llm_paused
+    from projects
+    where id = ${projectId}::uuid
+  `;
+  const project = projects[0];
+  if (!project) {
+    return;
+  }
+  const channels = await sql<{ id: string }[]>`
+    select id from channels where project_id = ${projectId}::uuid
+  `;
+  const data = {
+    projectId,
+    spendUsed: Number(project.spend_used),
+    spendCap: project.spend_cap === null ? null : Number(project.spend_cap),
+    llmPaused: project.llm_paused,
+  };
+  for (const channel of channels) {
+    publish(channel.id, "spend.updated", data);
+  }
+}
+
+export async function drainQueue(
+  deps: ExecuteDeps,
+  channelId: string,
+): Promise<string | null> {
+  const context = await loadContext(deps.sql, channelId);
+  if (context?.agentStatus !== "idle" || !context?.skillPack) {
+    return null;
+  }
+  if (await openConflict(deps.sql, channelId)) {
+    return null;
+  }
+  if (await mainIsActive(deps.sql, context.agentId)) {
+    return null;
+  }
+  if (spendBlock(context.llmPaused, context.spendCap, context.spendUsed)) {
+    return null;
   }
   const credentials = await listCandidates(
     deps.sql,
@@ -967,16 +1414,34 @@ export async function startContinuation(
     context.credentialId,
     context.modelId,
   );
-  if (credentials.active === 0) {
-    const id = await failNewRun(deps.sql, context, "missing_credential");
-    return { kind: "failed", run: { id, error: "missing_credential" } };
-  }
   if (credentials.usable.length === 0) {
-    const id = await failNewRun(deps.sql, context, "provider_failed");
-    return { kind: "failed", run: { id, error: "provider_failed" } };
+    return null;
+  }
+  const items = await deps.sql<{ id: string; body: string }[]>`
+    select instruction_queue_items.id, messages.body
+    from instruction_queue_items
+    join messages on messages.id = instruction_queue_items.message_id
+    where instruction_queue_items.channel_id = ${channelId}::uuid
+      and instruction_queue_items.status = 'pending'
+    order by instruction_queue_items.created_at asc, instruction_queue_items.id asc
+    limit 1
+  `;
+  const item = items[0];
+  if (!item) {
+    return null;
   }
   try {
     const id = await deps.sql.begin(async (tx) => {
+      const updated = await tx<{ id: string }[]>`
+        update instruction_queue_items
+        set status = 'completed'
+        where id = ${item.id}::uuid
+          and status = 'pending'
+        returning id
+      `;
+      if (!updated[0]) {
+        return null;
+      }
       const rows = await tx<{ id: string }[]>`
         insert into agent_runs (
           project_id, channel_id, agent_id, kind, status
@@ -1000,13 +1465,34 @@ export async function startContinuation(
       `;
       return runId;
     });
-    return { kind: "started", run: { id } };
+    if (!id) {
+      return null;
+    }
+    runRequests.set(id, item.body);
+    return id;
   } catch (error) {
     if (isUniqueViolation(error)) {
-      return { kind: "skipped", run: { error: "agent_busy" } };
+      return null;
     }
     throw error;
   }
+}
+
+export async function drainProject(
+  deps: ExecuteDeps,
+  projectId: string,
+): Promise<string[]> {
+  const channels = await deps.sql<{ id: string }[]>`
+    select id from channels where project_id = ${projectId}::uuid
+  `;
+  const started: string[] = [];
+  for (const channel of channels) {
+    const id = await drainQueue(deps, channel.id);
+    if (id) {
+      started.push(id);
+    }
+  }
+  return started;
 }
 
 export async function recoverStuckRuns(sql: Sql): Promise<void> {

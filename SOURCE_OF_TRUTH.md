@@ -8,7 +8,7 @@
 | Project name                       | Dawk (**Assumption** A-001 — inferred from Git remote; not yet confirmed by owner)                                                                                                       |
 | Document purpose                   | Canonical record of requirements, architecture, decisions, feasibility, and open questions for planning. Not an implementation guide for code.                                           |
 | Last updated                       | 2026-10-09                                                                                                                                                                               |
-| Current planning phase             | **Phase 1 implementation, M10** (invites and Resend; design remains in this document) |
+| Current planning phase             | **Phase 1 implementation, M11** (queue, Q&A, conflicts, and spend; design remains in this document) |
 | Current status                     | Coding authorized for Phase 1 local work from M0 (2026-10-09, ADR-027). IMP-SEC-001 + IMP-Q-002 accepted. M13 still waits on HOST-1. |
 | Known limitations of this document | §11 stays conceptual. Phase 1 DDL is `apps/api/migrations` (M1–M2). Project APIs start at M3. Free-tier host vendors intentionally undecided until M13 (no vendor lock-in). |
 
@@ -1447,5 +1447,6 @@ Confidence: **medium** on posture; **low** on specific $ until stack + usage kno
 | 2026-10-09 | M8 plans: an awaiting plan pauses the agent. Only the Owner can approve, and that approval starts one continuation. | UF-007, SC-004. | T-010, M8, API-AGENT, SEC-CHECK C2 |
 | 2026-10-09 | M9 decisions: pending proposals stay out of the Brief until the Owner accepts them and notices go to the affected channels. | UF-008, FR-036, ADR-023. | T-011, M9, API-DEC, SEC-CHECK C3 |
 | 2026-10-10 | M10 invites: an email invite joins a new user as a Member. MAIL-1: Resend free plan is 3,000 transactional emails per month and 100 per UTC day; sent and received count, and each recipient counts separately; 3 verified domains. Live Resend send unverified. | UF-003, UF-004, FR-026, ADR-016, ADR-018. | T-012, M10, MAIL-1, SEC-CHECK B3, E2, E3 |
+| 2026-10-10 | M11 queue: work waits while the Orchestrator is busy, a question gets a short side run, and only the Owner resolves a conflict. Pause and cap stay visible on the channel. | UF-009, UF-010, UF-012, FR-022. | T-013, M11, SC-005, SC-006, SC-012, SEC-CHECK C2, D5 |
 
 
