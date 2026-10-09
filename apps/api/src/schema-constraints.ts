@@ -563,6 +563,14 @@ async function main(): Promise<void> {
     }
 
     await migrateDown(sql, { force: true });
+    if (!(await skillSlugExists(sql, "orchestrator"))) {
+      throw new Error("Decision down migration removed the orchestrator pack");
+    }
+    if (!(await indexExists(sql, "plans_one_awaiting"))) {
+      throw new Error("Decision down migration removed the awaiting index");
+    }
+
+    await migrateDown(sql, { force: true });
     if (await indexExists(sql, "plans_one_awaiting")) {
       throw new Error("Plan down migration left the awaiting index");
     }

@@ -143,4 +143,4 @@ Do not commit `.env`, API keys, passwords, or session tokens. `SESSION_SECRET` a
 
 ## Scope right now
 
-Local only. The Orchestrator can submit a plan, and only the Owner can approve it before the work continues. Invites come in a later milestone. Hosting vendors stay undecided until M13.
+Local only. A pending decision stays out of the Brief until the Owner accepts it. Invites come in a later milestone. Hosting vendors stay undecided until M13.

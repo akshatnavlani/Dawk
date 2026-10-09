@@ -7,6 +7,7 @@ import {
   fieldClass,
   messageFor,
 } from "../../auth-shared";
+import { DecisionsPanel } from "./decisions-panel";
 
 type ChatMessage = {
   id: string;
@@ -484,6 +485,13 @@ export function ChannelThread({
           </button>
         </form>
       </div>
+      {channelId ? (
+        <DecisionsPanel
+          projectId={projectId}
+          channelId={channelId}
+          role={role}
+        />
+      ) : null}
     </section>
   );
 }

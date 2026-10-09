@@ -1005,4 +1005,255 @@ describe("worker", () => {
     await settle();
     expect(seen).toHaveLength(0);
   });
+
+  test("a pending decision is not packed as a fact", async () => {
+    seen.length = 0;
+    handler = () => finalResult("Noted.");
+    const ownerCookie = await signup(app, emailAddress());
+    const memberEmail = emailAddress();
+    const memberCookie = await signup(app, memberEmail);
+    const strangerCookie = await signup(app, emailAddress());
+    const project = await createProject(app, ownerCookie);
+    const member = await sql<{ id: string }[]>`
+      select id from users where email = ${memberEmail}
+    `;
+    const memberId = member[0]?.id;
+    if (!memberId) {
+      throw new Error("member missing");
+    }
+    await sql`
+      insert into memberships (project_id, user_id, role)
+      values (${project.id}::uuid, ${memberId}::uuid, 'member')
+    `;
+    await saveKey(app, ownerCookie, project.id, {
+      provider: "anthropic",
+      label: "Claude",
+      secret,
+      isPrimary: true,
+    });
+    const proposed = await app.request(`/projects/${project.id}/decisions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: memberCookie },
+      body: JSON.stringify({
+        proposal: "Support light and dark theme.",
+        originChannelId: project.orchestrator.channelId,
+      }),
+    });
+    expect(proposed.status).toBe(201);
+    const created = (await proposed.json()) as {
+      decision: { id: string; status: string };
+    };
+    expect(created.decision.status).toBe("pending");
+    const posted = await postMessage(
+      app,
+      ownerCookie,
+      project.orchestrator.channelId,
+      "What is decided?",
+    );
+    expect(posted.status).toBe(201);
+    await settle();
+    expect(seen[0]?.user.includes("Support light and dark theme.")).toBe(false);
+    const brief = await app.request(`/projects/${project.id}/brief`, {
+      headers: { cookie: memberCookie },
+    });
+    const briefBody = (await brief.json()) as { brief: { pins?: unknown[] } };
+    expect(briefBody.brief.pins ?? []).toHaveLength(0);
+
+    const memberAccept = await app.request(
+      `/decisions/${created.decision.id}/accept`,
+      { method: "POST", headers: { cookie: memberCookie } },
+    );
+    expect(memberAccept.status).toBe(403);
+    const memberReject = await app.request(
+      `/decisions/${created.decision.id}/reject`,
+      { method: "POST", headers: { cookie: memberCookie } },
+    );
+    expect(memberReject.status).toBe(403);
+    const support = await app.request(
+      `/decisions/${created.decision.id}/support`,
+      { method: "POST", headers: { cookie: memberCookie } },
+    );
+    expect(support.status).toBe(200);
+    const supportAgain = await app.request(
+      `/decisions/${created.decision.id}/support`,
+      { method: "POST", headers: { cookie: memberCookie } },
+    );
+    expect(supportAgain.status).toBe(200);
+    const ownerSupport = await app.request(
+      `/decisions/${created.decision.id}/support`,
+      { method: "POST", headers: { cookie: ownerCookie } },
+    );
+    expect(ownerSupport.status).toBe(200);
+    const supports = await sql<{ n: number }[]>`
+      select count(*)::int as n from decision_supports
+      where decision_id = ${created.decision.id}::uuid
+    `;
+    expect(supports[0]?.n).toBe(2);
+    const still = await sql<{ status: string }[]>`
+      select status from decisions where id = ${created.decision.id}::uuid
+    `;
+    expect(still[0]?.status).toBe("pending");
+
+    const accepted = await app.request(
+      `/decisions/${created.decision.id}/accept`,
+      { method: "POST", headers: { cookie: ownerCookie } },
+    );
+    expect(accepted.status).toBe(200);
+    const owner = await sql<{ user_id: string }[]>`
+      select user_id from memberships
+      where project_id = ${project.id}::uuid and role = 'owner'
+    `;
+    const stored = await sql<{ status: string; accepted_by_user_id: string }[]>`
+      select status, accepted_by_user_id
+      from decisions
+      where id = ${created.decision.id}::uuid
+    `;
+    expect(stored[0]?.status).toBe("accepted");
+    expect(stored[0]?.accepted_by_user_id).toBe(owner[0]?.user_id);
+    const notices = await sql<{ n: number }[]>`
+      select count(*)::int as n from messages
+      where channel_id = ${project.orchestrator.channelId}::uuid
+        and author_kind = 'system'
+        and body = 'Decision accepted: Support light and dark theme.'
+    `;
+    expect(notices[0]?.n).toBe(1);
+    const pinned = await sql<{ content: { pins?: { proposal: string }[] } }[]>`
+      select content from project_briefs where project_id = ${project.id}::uuid
+    `;
+    expect(pinned[0]?.content.pins).toHaveLength(1);
+
+    seen.length = 0;
+    const follow = await postMessage(
+      app,
+      ownerCookie,
+      project.orchestrator.channelId,
+      "Use the decision.",
+    );
+    expect(follow.status).toBe(201);
+    await settle();
+    expect(seen[0]?.user.includes("Accepted decisions:")).toBe(true);
+    expect(seen[0]?.user.includes("Support light and dark theme.")).toBe(true);
+    expect(seen[0]?.user.includes('"pins"')).toBe(true);
+
+    const again = await app.request(
+      `/decisions/${created.decision.id}/accept`,
+      { method: "POST", headers: { cookie: ownerCookie } },
+    );
+    expect(again.status).toBe(200);
+    const noticesAfter = await sql<{ n: number }[]>`
+      select count(*)::int as n from messages
+      where channel_id = ${project.orchestrator.channelId}::uuid
+        and body = 'Decision accepted: Support light and dark theme.'
+    `;
+    expect(noticesAfter[0]?.n).toBe(1);
+    const pinsAfter = await sql<{ content: { pins?: unknown[] } }[]>`
+      select content from project_briefs where project_id = ${project.id}::uuid
+    `;
+    expect(pinsAfter[0]?.content.pins).toHaveLength(1);
+
+    const stranger = await app.request(`/projects/${project.id}/decisions`, {
+      headers: { cookie: strangerCookie },
+    });
+    expect(stranger.status).toBe(404);
+  });
+
+  test("a decision turn stays pending and idle", async () => {
+    seen.length = 0;
+    handler = () => ({
+      text: JSON.stringify({
+        status: "decision",
+        notes: "Proposing a theme.",
+        proposal: "The app supports a dark theme.",
+      }),
+      tokenIn: 5,
+      tokenOut: 4,
+      costEst: 0.01,
+    });
+    const cookie = await signup(app, emailAddress());
+    const project = await createProject(app, cookie);
+    await saveKey(app, cookie, project.id, {
+      provider: "anthropic",
+      label: "Claude",
+      secret,
+      isPrimary: true,
+    });
+    const posted = await postMessage(
+      app,
+      cookie,
+      project.orchestrator.channelId,
+      "Record a decision",
+    );
+    expect(posted.status).toBe(201);
+    await settle();
+    const agent = await sql<{ status: string }[]>`
+      select status from agents where id = ${project.orchestrator.agentId}::uuid
+    `;
+    expect(agent[0]?.status).toBe("idle");
+    const decision = await sql<
+      { status: string; proposed_by_agent_id: string }[]
+    >`
+      select status, proposed_by_agent_id
+      from decisions
+      where project_id = ${project.id}::uuid
+    `;
+    expect(decision[0]?.status).toBe("pending");
+    expect(decision[0]?.proposed_by_agent_id).toBe(
+      project.orchestrator.agentId,
+    );
+    const run = await sql<{ status: string }[]>`
+      select status from agent_runs
+      where channel_id = ${project.orchestrator.channelId}::uuid
+    `;
+    expect(run[0]?.status).toBe("succeeded");
+  });
+
+  test("owner reject does not pin the brief or post an accepted notice", async () => {
+    const ownerCookie = await signup(app, emailAddress());
+    const project = await createProject(app, ownerCookie);
+    const proposed = await app.request(`/projects/${project.id}/decisions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: ownerCookie },
+      body: JSON.stringify({
+        proposal: "Ship without accounts.",
+        originChannelId: project.orchestrator.channelId,
+      }),
+    });
+    expect(proposed.status).toBe(201);
+    const created = (await proposed.json()) as { decision: { id: string } };
+    const rejected = await app.request(
+      `/decisions/${created.decision.id}/reject`,
+      { method: "POST", headers: { cookie: ownerCookie } },
+    );
+    expect(rejected.status).toBe(200);
+    const brief = await sql<{ content: { pins?: unknown[] } }[]>`
+      select content from project_briefs where project_id = ${project.id}::uuid
+    `;
+    expect(brief[0]?.content.pins ?? []).toHaveLength(0);
+    const acceptedNotices = await sql<{ n: number }[]>`
+      select count(*)::int as n from messages
+      where channel_id = ${project.orchestrator.channelId}::uuid
+        and body like 'Decision accepted:%'
+    `;
+    expect(acceptedNotices[0]?.n).toBe(0);
+    const rejectedNotices = await sql<{ n: number }[]>`
+      select count(*)::int as n from messages
+      where channel_id = ${project.orchestrator.channelId}::uuid
+        and body = 'Decision rejected: Ship without accounts.'
+    `;
+    expect(rejectedNotices[0]?.n).toBe(1);
+    const again = await app.request(
+      `/decisions/${created.decision.id}/reject`,
+      {
+        method: "POST",
+        headers: { cookie: ownerCookie },
+      },
+    );
+    expect(again.status).toBe(200);
+    const rejectedAfter = await sql<{ n: number }[]>`
+      select count(*)::int as n from messages
+      where channel_id = ${project.orchestrator.channelId}::uuid
+        and body = 'Decision rejected: Ship without accounts.'
+    `;
+    expect(rejectedAfter[0]?.n).toBe(1);
+  });
 });

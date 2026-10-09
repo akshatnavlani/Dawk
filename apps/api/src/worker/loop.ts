@@ -20,11 +20,12 @@ const planBodySchema = z.object({
 
 const turnSchema = z
   .object({
-    status: z.enum(["working", "final", "plan"]),
+    status: z.enum(["working", "final", "plan", "decision"]),
     notes: z.string().trim().min(1).max(4000),
     answer: z.string().trim().min(1).max(8000).optional(),
     summary: z.string().trim().min(1).max(2000).optional(),
     plan: planBodySchema.optional(),
+    proposal: z.string().trim().min(1).max(2000).optional(),
   })
   .superRefine((value, ctx) => {
     if (value.status === "final") {
@@ -41,6 +42,13 @@ const turnSchema = z
     }
     if (value.status === "plan" && !value.plan) {
       ctx.addIssue({ code: "custom", path: ["plan"], message: "plan" });
+    }
+    if (value.status === "decision" && !value.proposal) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["proposal"],
+        message: "proposal",
+      });
     }
   });
 
@@ -112,10 +120,12 @@ function systemPrompt(skill: string): string {
     skill,
     "",
     "Reply with one JSON object and no markdown.",
-    'Keys: status ("working", "final", or "plan"), notes (string).',
+    'Keys: status ("working", "final", "plan", or "decision"), notes (string).',
     "When status is final, also include answer and summary.",
     "When status is plan, also include plan with summary and steps.",
+    "When status is decision, also include proposal.",
     "A plan is not approved until the owner says so.",
+    "A pending decision is not a fact until the owner accepts it.",
     "status working is a progress note. status final is the channel reply.",
   ].join("\n");
 }
@@ -616,6 +626,55 @@ async function recordTurn(
     let planEvent:
       | { id: string; body: { summary: string; steps: string[] } }
       | undefined;
+    let decisionEvent: { id: string; proposal: string } | undefined;
+    if (turn.status === "decision" && turn.proposal) {
+      const decisions = await tx<{ id: string }[]>`
+        insert into decisions (
+          project_id, status, proposal, proposed_by_agent_id,
+          origin_channel_id, impact_agent_ids
+        )
+        values (
+          ${context.projectId}::uuid,
+          'pending',
+          ${turn.proposal},
+          ${context.agentId}::uuid,
+          ${context.channelId}::uuid,
+          coalesce(
+            (select array_agg(id) from agents where project_id = ${context.projectId}::uuid),
+            '{}'::uuid[]
+          )
+        )
+        returning id
+      `;
+      const decisionId = decisions[0]?.id;
+      if (!decisionId) {
+        throw new Error("decision insert failed");
+      }
+      decisionEvent = { id: decisionId, proposal: turn.proposal };
+      const messages = await tx<
+        { id: string; body: string; created_at: Date }[]
+      >`
+        insert into messages (channel_id, author_kind, body, run_id)
+        values (
+          ${context.channelId}::uuid,
+          'agent',
+          ${turn.proposal},
+          ${runId}::uuid
+        )
+        returning id, body, created_at
+      `;
+      message = messages[0];
+      await tx`
+        update agent_runs
+        set status = 'succeeded', updated_at = now()
+        where id = ${runId}::uuid
+      `;
+      await tx`
+        update agents
+        set status = 'idle', updated_at = now()
+        where id = ${context.agentId}::uuid
+      `;
+    }
     if (turn.status === "plan" && turn.plan) {
       await tx`
         update plans
@@ -708,7 +767,7 @@ async function recordTurn(
       from agent_runs
       where id = ${runId}::uuid
     `;
-    return { stepIndex, message, totals: totals[0], planEvent };
+    return { stepIndex, message, totals: totals[0], planEvent, decisionEvent };
   });
 
   publish(context.channelId, "run.step", {
@@ -728,6 +787,14 @@ async function recordTurn(
       agentId: context.agentId,
       status: "awaiting",
       body: saved.planEvent.body,
+    });
+  }
+  if (saved.decisionEvent) {
+    publish(context.channelId, "decision.updated", {
+      decisionId: saved.decisionEvent.id,
+      projectId: context.projectId,
+      status: "pending",
+      proposal: saved.decisionEvent.proposal,
     });
   }
   if (saved.message) {
@@ -840,7 +907,11 @@ export async function executeRun(
         }
       }
       await recordTurn(deps, context, runId, iteration, turn, outcome);
-      if (turn.status === "final" || turn.status === "plan") {
+      if (
+        turn.status === "final" ||
+        turn.status === "plan" ||
+        turn.status === "decision"
+      ) {
         return;
       }
     }

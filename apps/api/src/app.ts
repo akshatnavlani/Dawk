@@ -9,6 +9,7 @@ import { createAuthRoutes } from "./auth/routes";
 import { createChannelRoutes } from "./channels/routes";
 import { createCredentialRoutes } from "./credentials/routes";
 import { ping } from "./db";
+import { createDecisionRoutes } from "./decisions/routes";
 import type { Env } from "./env";
 import { createProjectRoutes } from "./projects/routes";
 import { enqueueRun, executeRun, startContinuation } from "./worker/loop";
@@ -123,6 +124,13 @@ export function createApp(deps: AppDeps): Hono {
           schedule(started.run.id);
         }
       },
+    }),
+  );
+  app.route(
+    "/",
+    createDecisionRoutes({
+      sql: deps.sql,
+      sessionSecret: deps.env.SESSION_SECRET,
     }),
   );
   app.route(
