@@ -96,6 +96,10 @@ export function AccountPanel() {
         </button>
       </form>
       <p className="mt-8 text-sm text-stone-500">
+        <a className={linkClass} href="/projects">
+          Projects
+        </a>
+        {" · "}
         <a className={linkClass} href="/">
           Back to status
         </a>

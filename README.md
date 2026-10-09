@@ -142,4 +142,4 @@ Do not commit `.env`, API keys, passwords, or session tokens. `SESSION_SECRET` a
 
 ## Scope right now
 
-Local only. Projects, invites, channels, and agents come in later milestones. Hosting vendors stay undecided until M13.
+Local only. A signed-in user can create a project, which always includes an Orchestrator channel. Invites, chat, and agents that run come in later milestones. Hosting vendors stay undecided until M13.

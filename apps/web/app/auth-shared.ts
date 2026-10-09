@@ -19,6 +19,8 @@ const messages: Record<string, string> = {
   email_verify_used: "That email confirmation link was already used.",
   email_verify_expired:
     "That email confirmation link expired. Request a new one.",
+  not_found: "That project was not found.",
+  forbidden: "Only the project owner can do that.",
 };
 
 export function messageFor(code: string | null): string | null {

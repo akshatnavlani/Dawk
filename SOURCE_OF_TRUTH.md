@@ -8,7 +8,7 @@
 | Project name                       | Dawk (**Assumption** A-001 — inferred from Git remote; not yet confirmed by owner)                                                                                                       |
 | Document purpose                   | Canonical record of requirements, architecture, decisions, feasibility, and open questions for planning. Not an implementation guide for code.                                           |
 | Last updated                       | 2026-10-09                                                                                                                                                                               |
-| Current planning phase             | **Phase 1 implementation, M2** (local auth; design remains in this document) |
+| Current planning phase             | **Phase 1 implementation, M3** (projects and membership; design remains in this document) |
 | Current status                     | Coding authorized for Phase 1 local work from M0 (2026-10-09, ADR-027). IMP-SEC-001 + IMP-Q-002 accepted. M13 still waits on HOST-1. |
 | Known limitations of this document | §11 stays conceptual. Phase 1 DDL is `apps/api/migrations` (M1–M2). Project APIs start at M3. Free-tier host vendors intentionally undecided until M13 (no vendor lock-in). |
 
@@ -1439,5 +1439,6 @@ Confidence: **medium** on posture; **low** on specific $ until stack + usage kno
 | 2026-10-09 | ADR-000 **Superseded**. ADR-027 accepted: Phase 1 local coding authorized from M0. Go for M0–M12 local; M13 still waits on HOST-1. | Owner handoff lifted the planning-only ban for Phase 1 implementation. | ADR-000, ADR-027, IMP-Q-003 |
 | 2026-10-09 | M1 DDL pointer: Phase 1 tables live in `apps/api/migrations`. §11 stays conceptual. | Schema milestone implemented the accepted entity model. | §11, T-002 |
 | 2026-10-09 | M2 auth: session, magic-link, Google, and change-email tables and routes. Added `GET /auth/session` and `GET /auth/email/verify`. | UF-001 needs a cookie lookup and a second step to prove the new email. | API-AUTH, FR-025, FR-029, T-003, T-004 |
+| 2026-10-09 | M3 projects: create project bootstraps Owner membership, Orchestrator agent, and channel. Invites stay later. | UF-002 without BYOK. | API-PROJ, ADR-007, ADR-022, T-005 |
 
 

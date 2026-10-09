@@ -50,7 +50,7 @@ type AuthDeps = {
   googleTokenClient: GoogleTokenClient;
 };
 
-type SessionUser = {
+export type SessionUser = {
   id: string;
   email: string;
 };
@@ -123,7 +123,7 @@ async function issueSession(
   c.header("Set-Cookie", sessionCookie(sealed.cookieValue));
 }
 
-async function currentUser(
+export async function currentUser(
   c: Context,
   sql: Sql,
   sessionSecret: string,

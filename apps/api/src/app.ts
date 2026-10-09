@@ -8,6 +8,7 @@ import { createRateLimiter, type RateLimiter } from "./auth/rate-limit";
 import { createAuthRoutes } from "./auth/routes";
 import { ping } from "./db";
 import type { Env } from "./env";
+import { createProjectRoutes } from "./projects/routes";
 
 const healthBody = z.object({
   ok: z.boolean(),
@@ -56,6 +57,13 @@ export function createApp(deps: AppDeps): Hono {
       googleClientId: deps.env.GOOGLE_CLIENT_ID,
       googleClientSecret: deps.env.GOOGLE_CLIENT_SECRET,
       googleTokenClient: deps.googleTokenClient ?? exchangeGoogleCode,
+    }),
+  );
+  app.route(
+    "/",
+    createProjectRoutes({
+      sql: deps.sql,
+      sessionSecret: deps.env.SESSION_SECRET,
     }),
   );
 
