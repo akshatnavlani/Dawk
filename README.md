@@ -131,7 +131,7 @@ http://127.0.0.1:3001/auth/google/callback
 
 Then start at http://127.0.0.1:3001/auth/google/start. A successful login lands on `/account`. Cancelling returns to `/login`. If the Google env names are empty, that start URL returns `google_not_configured` and password plus magic link still work.
 
-A friend test uses one public URL. Set `NEXT_PUBLIC_API_ORIGIN` to `/api` and `APP_URL` to the https tunnel origin with no trailing slash, then restart. Next forwards `/api` to the API on port 3001. The session cookie gains `Secure` only when `APP_URL` is https. Local `http://127.0.0.1:3000` stays unchanged when `NEXT_PUBLIC_API_ORIGIN` is blank. Google sign-in stays on the localhost callback above.
+A friend test needs two public URLs because a long-lived channel stream through Next's `/api` rewrite returned 500. Run one Cloudflare quick tunnel to port 3000 and another to port 3001. Set `APP_URL` to the web tunnel and `NEXT_PUBLIC_API_ORIGIN` to the API tunnel, then restart. When `APP_URL` is https, the session cookie is `Secure` and `SameSite=None` so the browser can send it to the API host. Local `http://127.0.0.1:3000` stays `SameSite=Lax` without `Secure`. Google sign-in stays on the localhost callback above.
 
 ## Layout
 

@@ -72,13 +72,15 @@ function clientIp(c: Context): string {
 }
 
 function sessionCookie(value: string, secure: boolean): string {
+  const sameSite = secure ? "None" : "Lax";
   const secureFlag = secure ? "; Secure" : "";
-  return `${SESSION_COOKIE}=${value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_SECONDS}${secureFlag}`;
+  return `${SESSION_COOKIE}=${value}; HttpOnly; SameSite=${sameSite}; Path=/; Max-Age=${SESSION_SECONDS}${secureFlag}`;
 }
 
 function clearSessionCookie(secure: boolean): string {
+  const sameSite = secure ? "None" : "Lax";
   const secureFlag = secure ? "; Secure" : "";
-  return `${SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${secureFlag}`;
+  return `${SESSION_COOKIE}=; HttpOnly; SameSite=${sameSite}; Path=/; Max-Age=0${secureFlag}`;
 }
 
 function readCookie(c: Context): string | null {
