@@ -8,6 +8,7 @@ import {
   linkClass,
   messageFor,
 } from "../../auth-shared";
+import { ChannelThread } from "./channel-thread";
 
 type Project = {
   id: string;
@@ -89,16 +90,7 @@ export function ProjectPanel({ projectId }: { projectId: string }) {
           <p className="mt-3 text-stone-600">
             You are the {project.role}. Spend used {project.spendUsed}.
           </p>
-          <section className="mt-8 rounded-lg border border-stone-200 bg-white px-4 py-3">
-            <h2 className="text-lg font-semibold">
-              {project.orchestrator?.name ?? "Orchestrator"}
-            </h2>
-            <p className="mt-1 text-sm text-stone-600">
-              {project.orchestrator
-                ? `Channel is ready. Status: ${project.orchestrator.status}. Messages are not stored in this milestone.`
-                : "This project has no Orchestrator channel."}
-            </p>
-          </section>
+          <ChannelThread projectId={project.id} />
           {project.role === "owner" ? (
             <form className="mt-8 space-y-4" onSubmit={save}>
               <label className="block text-sm font-medium text-stone-700">

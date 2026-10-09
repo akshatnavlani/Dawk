@@ -6,6 +6,7 @@ import { exchangeGoogleCode, type GoogleTokenClient } from "./auth/google";
 import { consoleMailer, type Mailer } from "./auth/mail";
 import { createRateLimiter, type RateLimiter } from "./auth/rate-limit";
 import { createAuthRoutes } from "./auth/routes";
+import { createChannelRoutes } from "./channels/routes";
 import { ping } from "./db";
 import type { Env } from "./env";
 import { createProjectRoutes } from "./projects/routes";
@@ -32,7 +33,7 @@ export function createApp(deps: AppDeps): Hono {
       origin: deps.env.APP_URL,
       credentials: true,
       allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-      allowHeaders: ["Content-Type"],
+      allowHeaders: ["Content-Type", "Idempotency-Key"],
     }),
   );
 
@@ -62,6 +63,13 @@ export function createApp(deps: AppDeps): Hono {
   app.route(
     "/",
     createProjectRoutes({
+      sql: deps.sql,
+      sessionSecret: deps.env.SESSION_SECRET,
+    }),
+  );
+  app.route(
+    "/",
+    createChannelRoutes({
       sql: deps.sql,
       sessionSecret: deps.env.SESSION_SECRET,
     }),
