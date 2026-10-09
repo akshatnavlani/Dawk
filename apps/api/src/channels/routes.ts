@@ -4,6 +4,7 @@ import { streamSSE } from "hono/streaming";
 import type { Sql } from "postgres";
 import { z } from "zod";
 import { currentUser, type SessionUser } from "../auth/routes";
+import type { RunBody } from "../worker/loop";
 import { publishMessageCreated, subscribe } from "./hub";
 
 const DEFAULT_LIMIT = 50;
@@ -115,6 +116,7 @@ async function readJson(c: Context): Promise<unknown> {
 export function createChannelRoutes(deps: {
   sql: Sql;
   sessionSecret: string;
+  startRun: (channelId: string, userId: string) => Promise<RunBody>;
 }): Hono {
   const app = new Hono();
 
@@ -264,7 +266,8 @@ export function createChannelRoutes(deps: {
         authorUserId: view.authorUserId,
         createdAt: view.createdAt,
       });
-      return c.json(view, 201);
+      const run = await deps.startRun(channelId.data, user.id);
+      return c.json({ ...view, run }, 201);
     } catch (error) {
       const code =
         typeof error === "object" && error !== null && "code" in error
@@ -299,8 +302,8 @@ export function createChannelRoutes(deps: {
       const unsubscribe = subscribe(channelId.data, (event) => {
         void stream
           .writeSSE({
-            event: "message.created",
-            data: JSON.stringify(event),
+            event: event.event,
+            data: JSON.stringify(event.data),
           })
           .catch(() => {
             open = false;

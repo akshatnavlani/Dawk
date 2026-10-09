@@ -143,4 +143,4 @@ Do not commit `.env`, API keys, passwords, or session tokens. `SESSION_SECRET` a
 
 ## Scope right now
 
-Local only. Owners can save provider keys. They are encrypted, and the API returns only the last four characters. Invites and agents that run come in later milestones. Hosting vendors stay undecided until M13.
+Local only. A message in the Orchestrator channel starts a run on the Owner's saved key. The reply and working notes show in the channel. Invites come in a later milestone. Hosting vendors stay undecided until M13.

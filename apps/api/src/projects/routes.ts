@@ -178,8 +178,16 @@ export function createProjectRoutes(deps: {
         values (${project.id}::uuid, '{}'::jsonb)
       `;
       const agents = await tx<{ id: string }[]>`
-        insert into agents (project_id, kind, name, status)
-        values (${project.id}::uuid, 'orchestrator', 'Orchestrator', 'idle')
+        insert into agents (project_id, kind, name, status, skill_id)
+        select
+          ${project.id}::uuid,
+          'orchestrator',
+          'Orchestrator',
+          'idle',
+          skills.id
+        from skills
+        where skills.slug = 'orchestrator'
+          and skills.version = 1
         returning id
       `;
       const agent = agents[0];

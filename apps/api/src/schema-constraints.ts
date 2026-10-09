@@ -155,7 +155,7 @@ async function seed(sql: TransactionSql): Promise<void> {
     insert into skills (id, slug, name, system_prompt_pack, version)
     values (
       ${skillId}::uuid,
-      'orchestrator',
+      'schema_orchestrator',
       'Orchestrator',
       'Plan with the team.',
       1
@@ -487,6 +487,33 @@ async function columnExists(
   return rows[0]?.exists === true;
 }
 
+async function skillSlugExists(
+  sql: ReturnType<typeof createSql>,
+  slug: string,
+): Promise<boolean> {
+  const rows = await sql<{ exists: boolean }[]>`
+    select exists (
+      select 1 from skills where slug = ${slug}
+    ) as exists
+  `;
+  return rows[0]?.exists === true;
+}
+
+async function indexExists(
+  sql: ReturnType<typeof createSql>,
+  name: string,
+): Promise<boolean> {
+  const rows = await sql<{ exists: boolean }[]>`
+    select exists (
+      select 1
+      from pg_indexes
+      where schemaname = 'public'
+        and indexname = ${name}
+    ) as exists
+  `;
+  return rows[0]?.exists === true;
+}
+
 async function tableExists(
   sql: ReturnType<typeof createSql>,
   name: string,
@@ -528,6 +555,23 @@ async function main(): Promise<void> {
     if (Number(leftover[0]?.n ?? 0) !== 0) {
       throw new Error("Constraint test left rows behind");
     }
+    const catalog = await sql<{ n: number }[]>`
+      select count(*)::int as n from skills
+    `;
+    if (Number(catalog[0]?.n ?? 0) !== 3) {
+      throw new Error("Skill catalog was not seeded");
+    }
+
+    await migrateDown(sql, { force: true });
+    if (await skillSlugExists(sql, "orchestrator")) {
+      throw new Error("Skill down migration left the orchestrator pack");
+    }
+    if (await indexExists(sql, "agent_runs_one_active_main")) {
+      throw new Error("Skill down migration left the active-run index");
+    }
+    if (!(await columnExists(sql, "provider_credentials", "last_four"))) {
+      throw new Error("Skill down migration removed last_four");
+    }
 
     await migrateDown(sql);
     if (await columnExists(sql, "provider_credentials", "last_four")) {
@@ -554,10 +598,11 @@ async function main(): Promise<void> {
     if (
       !(await tableExists(sql, "users")) ||
       !(await tableExists(sql, "sessions")) ||
-      !(await columnExists(sql, "provider_credentials", "last_four"))
+      !(await columnExists(sql, "provider_credentials", "last_four")) ||
+      !(await skillSlugExists(sql, "orchestrator"))
     ) {
       throw new Error(
-        "Up migration did not restore users, sessions, and last_four",
+        "Up migration did not restore users, sessions, last_four, and skills",
       );
     }
 

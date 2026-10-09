@@ -11,7 +11,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.133.0",
     "hono": "^4.13.13",
+    "openai": "^7.31.0",
     "postgres": "^3.4.9",
     "zod": "^4.6.5"
   },

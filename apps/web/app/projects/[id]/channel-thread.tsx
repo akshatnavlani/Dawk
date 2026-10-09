@@ -17,6 +17,34 @@ type Channel = {
   status: string;
 };
 
+type RunStep = {
+  stepIndex: number;
+  iteration: number;
+  notes: string | null;
+  model: string | null;
+  tokenIn: number | null;
+  tokenOut: number | null;
+};
+
+type RunView = {
+  id: string;
+  status: string;
+  failureReason: string | null;
+  steps: RunStep[];
+};
+
+const failureText: Record<string, string> = {
+  spend_paused: "LLM calls are paused for this project.",
+  spend_cap: "This project is at its spend cap.",
+  missing_credential: "The owner has not saved a provider key.",
+  provider_failed: "The provider call failed.",
+  iteration_limit: "The Orchestrator stopped at the iteration limit.",
+  missing_skill: "This agent has no skill pack.",
+  invalid_response: "The model reply could not be read.",
+  agent_busy: "The Orchestrator is already working.",
+  rate_limited: "Too many runs were started. Try again later.",
+};
+
 function mergeMessages(
   current: ChatMessage[],
   incoming: ChatMessage[],
@@ -41,6 +69,7 @@ export function ChannelThread({ projectId }: { projectId: string }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [unread, setUnread] = useState<Record<string, number>>({});
+  const [run, setRun] = useState<RunView | null>(null);
 
   useEffect(() => {
     void (async () => {
@@ -69,6 +98,7 @@ export function ChannelThread({ projectId }: { projectId: string }) {
       return;
     }
     let cancelled = false;
+    setRun(null);
     async function loadHistory() {
       const response = await fetch(
         `${API_ORIGIN}/channels/${channelId}/messages`,
@@ -84,7 +114,34 @@ export function ChannelThread({ projectId }: { projectId: string }) {
       setMessages(body.messages ?? []);
       setNextCursor(body.nextCursor ?? null);
     }
+    async function loadRun() {
+      const response = await fetch(
+        `${API_ORIGIN}/channels/${channelId}/runs/latest`,
+        { credentials: "include" },
+      );
+      if (!response.ok || cancelled) {
+        return;
+      }
+      const body = (await response.json()) as { run?: RunView | null };
+      setRun(body.run ?? null);
+      const status = body.run?.status;
+      setChannels((current) =>
+        current.map((channel) =>
+          channel.id === channelId
+            ? {
+                ...channel,
+                status:
+                  status === "pending" || status === "running"
+                    ? "working"
+                    : "idle",
+              }
+            : channel,
+        ),
+      );
+    }
+
     void loadHistory();
+    void loadRun();
 
     const source = new EventSource(
       `${API_ORIGIN}/channels/${channelId}/events`,
@@ -95,9 +152,20 @@ export function ChannelThread({ projectId }: { projectId: string }) {
       const message = JSON.parse(event.data) as ChatMessage;
       setMessages((current) => mergeMessages(current, [message]));
     });
+    for (const name of [
+      "run.started",
+      "run.step",
+      "run.completed",
+      "run.failed",
+    ]) {
+      source.addEventListener(name, () => {
+        void loadRun();
+      });
+    }
     source.onopen = () => {
       if (opened) {
         void loadHistory();
+        void loadRun();
       }
       opened = true;
     };
@@ -172,12 +240,28 @@ export function ChannelThread({ projectId }: { projectId: string }) {
       setError("The message was not saved.");
       return;
     }
-    const message = (await response.json()) as ChatMessage;
+    const message = (await response.json()) as ChatMessage & {
+      run?: { error?: string };
+    };
     setMessages((current) =>
       current.some((item) => item.id === message.id)
         ? current
         : [...current, message],
     );
+    if (
+      message.run?.error === "rate_limited" ||
+      message.run?.error === "agent_busy"
+    ) {
+      setError(failureText[message.run.error] ?? "The run did not start.");
+    }
+    const latest = await fetch(
+      `${API_ORIGIN}/channels/${channelId}/runs/latest`,
+      { credentials: "include" },
+    );
+    if (latest.ok) {
+      const body = (await latest.json()) as { run?: RunView | null };
+      setRun(body.run ?? null);
+    }
     setDraft("");
   }
 
@@ -238,6 +322,33 @@ export function ChannelThread({ projectId }: { projectId: string }) {
             ))
           )}
         </ul>
+        {run && (run.steps.some((step) => step.notes) || run.failureReason) ? (
+          <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+            <h3 className="text-sm font-semibold text-amber-950">Working</h3>
+            {run.failureReason ? (
+              <p className="mt-2 text-sm text-red-700">
+                {failureText[run.failureReason] ?? "The run failed."}
+              </p>
+            ) : null}
+            <ul className="mt-2 space-y-2">
+              {run.steps
+                .filter((step) => step.notes)
+                .map((step) => (
+                  <li key={step.stepIndex}>
+                    <p className="whitespace-pre-wrap text-sm text-stone-800">
+                      {step.notes}
+                    </p>
+                    <p className="text-xs text-stone-500">
+                      Step {step.iteration}
+                      {step.model ? ` · ${step.model}` : ""}
+                      {step.tokenIn !== null ? ` · ${step.tokenIn} in` : ""}
+                      {step.tokenOut !== null ? ` · ${step.tokenOut} out` : ""}
+                    </p>
+                  </li>
+                ))}
+            </ul>
+          </div>
+        ) : null}
         <form className="mt-4 space-y-3" onSubmit={send}>
           <label className="block text-sm font-medium text-stone-700">
             Message
