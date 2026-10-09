@@ -681,3 +681,4 @@ High-level tasks for critical path (expand when coding ban lifts):
 | 2026-10-09 | T-005 done: project create bootstraps Owner, Orchestrator, and channel. Member patch is 403. M4 not started. | M3 DoD: new project always has an Orchestrator channel | T-005, M3, UF-002, ADR-022, SEC-CHECK C1 |
 | 2026-10-09 | T-006 done: channel list and message history persist. Idempotent posts. SSE not started. | M4 DoD: history reloads from Postgres | T-006, M4, API-CHAT, SEC-CHECK C4, F2 |
 | 2026-10-09 | T-007 done: two channel subscribers receive message.created. In-memory hub, no Redis. M6 not started. | M5 DoD: live message events | T-007, M5, UF-011, SEC-CHECK C5 |
+| 2026-10-09 | T-008 done: encrypted Owner credentials, masked list, primary/fallback, per-agent routing. No LLM. M7 not started. | M6 DoD: secrets not returned after save | T-008, M6, API-CRED, SEC-CHECK A1, A2, A6 |

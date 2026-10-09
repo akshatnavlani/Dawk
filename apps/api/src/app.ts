@@ -7,6 +7,7 @@ import { consoleMailer, type Mailer } from "./auth/mail";
 import { createRateLimiter, type RateLimiter } from "./auth/rate-limit";
 import { createAuthRoutes } from "./auth/routes";
 import { createChannelRoutes } from "./channels/routes";
+import { createCredentialRoutes } from "./credentials/routes";
 import { ping } from "./db";
 import type { Env } from "./env";
 import { createProjectRoutes } from "./projects/routes";
@@ -72,6 +73,14 @@ export function createApp(deps: AppDeps): Hono {
     createChannelRoutes({
       sql: deps.sql,
       sessionSecret: deps.env.SESSION_SECRET,
+    }),
+  );
+  app.route(
+    "/",
+    createCredentialRoutes({
+      sql: deps.sql,
+      sessionSecret: deps.env.SESSION_SECRET,
+      encryptionKey: deps.env.CREDENTIALS_ENCRYPTION_KEY,
     }),
   );
 

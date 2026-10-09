@@ -35,7 +35,8 @@ copy .env.example .env
 Edit `.env` and set:
 
 - `DATABASE_URL` — local Postgres. The shape is `postgres://USER:PASSWORD@127.0.0.1:5432/dawk`.
-- `SESSION_SECRET` — at least 32 random characters. This signs session cookies. It must be different from `CREDENTIALS_ENCRYPTION_KEY` when that key is set later. Changing `SESSION_SECRET` logs everyone out.
+- `SESSION_SECRET` — at least 32 random characters. This signs session cookies.
+- `CREDENTIALS_ENCRYPTION_KEY` — at least 32 random characters. This encrypts Owner provider keys. It must be different from `SESSION_SECRET`.
 - `APP_URL` — `http://127.0.0.1:3000` for local dev. No trailing slash.
 
 Put the real database password and session secret only in `.env`. That file is gitignored. `.env.example` stays empty on purpose.
@@ -84,7 +85,7 @@ A healthy API response looks like:
 {"ok":true,"service":"dawk-api","db":"up"}
 ```
 
-If Postgres is down, `db` is `"down"` and the HTTP status is 503. The process stays up. If `DATABASE_URL`, `SESSION_SECRET`, or `APP_URL` is missing, the API exits and prints how to fix it.
+If Postgres is down, `db` is `"down"` and the HTTP status is 503. The process stays up. If `DATABASE_URL`, `SESSION_SECRET`, `CREDENTIALS_ENCRYPTION_KEY`, or `APP_URL` is missing, or the two secrets match, the API exits and prints how to fix it.
 
 ## Checks
 
@@ -142,4 +143,4 @@ Do not commit `.env`, API keys, passwords, or session tokens. `SESSION_SECRET` a
 
 ## Scope right now
 
-Local only. Members on the same channel see a new message without reloading. Invites and agents that run come in later milestones. Hosting vendors stay undecided until M13.
+Local only. Owners can save provider keys. They are encrypted, and the API returns only the last four characters. Invites and agents that run come in later milestones. Hosting vendors stay undecided until M13.

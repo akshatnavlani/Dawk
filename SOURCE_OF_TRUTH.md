@@ -8,7 +8,7 @@
 | Project name                       | Dawk (**Assumption** A-001 — inferred from Git remote; not yet confirmed by owner)                                                                                                       |
 | Document purpose                   | Canonical record of requirements, architecture, decisions, feasibility, and open questions for planning. Not an implementation guide for code.                                           |
 | Last updated                       | 2026-10-09                                                                                                                                                                               |
-| Current planning phase             | **Phase 1 implementation, M5** (live channel updates; design remains in this document) |
+| Current planning phase             | **Phase 1 implementation, M6** (credential routing; design remains in this document) |
 | Current status                     | Coding authorized for Phase 1 local work from M0 (2026-10-09, ADR-027). IMP-SEC-001 + IMP-Q-002 accepted. M13 still waits on HOST-1. |
 | Known limitations of this document | §11 stays conceptual. Phase 1 DDL is `apps/api/migrations` (M1–M2). Project APIs start at M3. Free-tier host vendors intentionally undecided until M13 (no vendor lock-in). |
 
@@ -1442,5 +1442,6 @@ Confidence: **medium** on posture; **low** on specific $ until stack + usage kno
 | 2026-10-09 | M3 projects: create project bootstraps Owner membership, Orchestrator agent, and channel. Invites stay later. | UF-002 without BYOK. | API-PROJ, ADR-007, ADR-022, T-005 |
 | 2026-10-09 | M4 channel history: members can list channels and reload saved messages. SSE and agent runs stay later. | Persist path of UF-005. | API-CHAT, T-006, SEC-CHECK C4, F2 |
 | 2026-10-09 | M5 live updates: members on one channel receive `message.created`. No Redis. Agent runs stay later. | UF-011 for saved messages. | API-CHAT, T-007, SEC-CHECK C5 |
+| 2026-10-09 | M6 credentials: Owner keys encrypted at rest, masked in the API, with primary, fallback, and per-agent routing. No LLM calls. | FR-038, FR-039, IMP-Q-002. | API-CRED, T-008, SEC-CHECK A1, A2, A6 |
 
 

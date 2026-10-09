@@ -470,6 +470,23 @@ async function assertCredentialColumns(sql: TransactionSql): Promise<void> {
   }
 }
 
+async function columnExists(
+  sql: ReturnType<typeof createSql>,
+  table: string,
+  column: string,
+): Promise<boolean> {
+  const rows = await sql<{ exists: boolean }[]>`
+    select exists (
+      select 1
+      from information_schema.columns
+      where table_schema = 'public'
+        and table_name = ${table}
+        and column_name = ${column}
+    ) as exists
+  `;
+  return rows[0]?.exists === true;
+}
+
 async function tableExists(
   sql: ReturnType<typeof createSql>,
   name: string,
@@ -513,6 +530,14 @@ async function main(): Promise<void> {
     }
 
     await migrateDown(sql);
+    if (await columnExists(sql, "provider_credentials", "last_four")) {
+      throw new Error("Mask down migration left last_four in place");
+    }
+    if (!(await tableExists(sql, "sessions"))) {
+      throw new Error("Mask down migration removed sessions");
+    }
+
+    await migrateDown(sql);
     if (await tableExists(sql, "sessions")) {
       throw new Error("Auth down migration left sessions in place");
     }
@@ -528,9 +553,12 @@ async function main(): Promise<void> {
     await migrateUp(sql);
     if (
       !(await tableExists(sql, "users")) ||
-      !(await tableExists(sql, "sessions"))
+      !(await tableExists(sql, "sessions")) ||
+      !(await columnExists(sql, "provider_credentials", "last_four"))
     ) {
-      throw new Error("Up migration did not restore users and sessions");
+      throw new Error(
+        "Up migration did not restore users, sessions, and last_four",
+      );
     }
 
     console.log("schema: constraints ok");

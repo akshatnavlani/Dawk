@@ -12,6 +12,14 @@ if (
 ) {
   process.env.SESSION_SECRET = "test-session-secret-at-least-32-chars";
 }
+if (
+  !process.env.CREDENTIALS_ENCRYPTION_KEY ||
+  process.env.CREDENTIALS_ENCRYPTION_KEY.trim().length < 32 ||
+  process.env.CREDENTIALS_ENCRYPTION_KEY === process.env.SESSION_SECRET
+) {
+  process.env.CREDENTIALS_ENCRYPTION_KEY =
+    "test-credentials-key-not-the-session-secret";
+}
 
 const database = loadDatabaseEnv();
 const sql = createSql(database.DATABASE_URL);

@@ -9,6 +9,7 @@ import {
   messageFor,
 } from "../../auth-shared";
 import { ChannelThread } from "./channel-thread";
+import { CredentialsPanel } from "./credentials-panel";
 
 type Project = {
   id: string;
@@ -91,6 +92,12 @@ export function ProjectPanel({ projectId }: { projectId: string }) {
             You are the {project.role}. Spend used {project.spendUsed}.
           </p>
           <ChannelThread projectId={project.id} />
+          {project.role === "owner" ? (
+            <CredentialsPanel
+              projectId={project.id}
+              agentId={project.orchestrator?.agentId ?? null}
+            />
+          ) : null}
           {project.role === "owner" ? (
             <form className="mt-8 space-y-4" onSubmit={save}>
               <label className="block text-sm font-medium text-stone-700">
