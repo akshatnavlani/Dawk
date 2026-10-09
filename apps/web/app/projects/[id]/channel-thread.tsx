@@ -17,6 +17,21 @@ type Channel = {
   status: string;
 };
 
+function mergeMessages(
+  current: ChatMessage[],
+  incoming: ChatMessage[],
+): ChatMessage[] {
+  const seen = new Set(current.map((item) => item.id));
+  const next = [...current];
+  for (const message of incoming) {
+    if (!seen.has(message.id)) {
+      seen.add(message.id);
+      next.push(message);
+    }
+  }
+  return next;
+}
+
 export function ChannelThread({ projectId }: { projectId: string }) {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [channelId, setChannelId] = useState<string | null>(null);
@@ -25,6 +40,7 @@ export function ChannelThread({ projectId }: { projectId: string }) {
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [unread, setUnread] = useState<Record<string, number>>({});
 
   useEffect(() => {
     void (async () => {
@@ -52,12 +68,13 @@ export function ChannelThread({ projectId }: { projectId: string }) {
     if (!channelId) {
       return;
     }
-    void (async () => {
+    let cancelled = false;
+    async function loadHistory() {
       const response = await fetch(
         `${API_ORIGIN}/channels/${channelId}/messages`,
         { credentials: "include" },
       );
-      if (!response.ok) {
+      if (!response.ok || cancelled) {
         return;
       }
       const body = (await response.json()) as {
@@ -66,8 +83,51 @@ export function ChannelThread({ projectId }: { projectId: string }) {
       };
       setMessages(body.messages ?? []);
       setNextCursor(body.nextCursor ?? null);
-    })();
+    }
+    void loadHistory();
+
+    const source = new EventSource(
+      `${API_ORIGIN}/channels/${channelId}/events`,
+      { withCredentials: true },
+    );
+    let opened = false;
+    source.addEventListener("message.created", (event) => {
+      const message = JSON.parse(event.data) as ChatMessage;
+      setMessages((current) => mergeMessages(current, [message]));
+    });
+    source.onopen = () => {
+      if (opened) {
+        void loadHistory();
+      }
+      opened = true;
+    };
+    return () => {
+      cancelled = true;
+      source.close();
+    };
   }, [channelId]);
+
+  useEffect(() => {
+    const others = channels.filter((channel) => channel.id !== channelId);
+    const sources = others.map((channel) => {
+      const source = new EventSource(
+        `${API_ORIGIN}/channels/${channel.id}/events`,
+        { withCredentials: true },
+      );
+      source.addEventListener("message.created", () => {
+        setUnread((current) => ({
+          ...current,
+          [channel.id]: (current[channel.id] ?? 0) + 1,
+        }));
+      });
+      return source;
+    });
+    return () => {
+      for (const source of sources) {
+        source.close();
+      }
+    };
+  }, [channels, channelId]);
 
   async function loadOlder() {
     if (!channelId || !nextCursor) {
@@ -136,10 +196,18 @@ export function ChannelThread({ projectId }: { projectId: string }) {
                 : "bg-stone-200 text-stone-800"
             }`}
             type="button"
-            onClick={() => setChannelId(channel.id)}
+            onClick={() => {
+              setChannelId(channel.id);
+              setUnread((current) => ({ ...current, [channel.id]: 0 }));
+            }}
           >
             {channel.name}
             <span className="ml-2 text-xs opacity-70">{channel.status}</span>
+            {unread[channel.id] ? (
+              <span className="ml-2 rounded-full bg-emerald-200 px-2 text-xs text-emerald-950">
+                {unread[channel.id]}
+              </span>
+            ) : null}
           </button>
         ))}
       </div>

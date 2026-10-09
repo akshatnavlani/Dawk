@@ -680,3 +680,4 @@ High-level tasks for critical path (expand when coding ban lifts):
 | 2026-10-09 | T-003 and T-004 done: password, magic-link, Google, sessions, logout, and verified change-email. Clarified `GET /auth/session` and `GET /auth/email/verify`. M3 not started. | M2 DoD: three local login methods | T-003, T-004, M2, API-AUTH, SEC-CHECK B1 B2 B4 B5 B6 D1 D3 |
 | 2026-10-09 | T-005 done: project create bootstraps Owner, Orchestrator, and channel. Member patch is 403. M4 not started. | M3 DoD: new project always has an Orchestrator channel | T-005, M3, UF-002, ADR-022, SEC-CHECK C1 |
 | 2026-10-09 | T-006 done: channel list and message history persist. Idempotent posts. SSE not started. | M4 DoD: history reloads from Postgres | T-006, M4, API-CHAT, SEC-CHECK C4, F2 |
+| 2026-10-09 | T-007 done: two channel subscribers receive message.created. In-memory hub, no Redis. M6 not started. | M5 DoD: live message events | T-007, M5, UF-011, SEC-CHECK C5 |

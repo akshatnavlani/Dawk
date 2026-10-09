@@ -1,8 +1,10 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
 import type { Sql } from "postgres";
 import { z } from "zod";
 import { currentUser, type SessionUser } from "../auth/routes";
+import { publishMessageCreated, subscribe } from "./hub";
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
@@ -254,7 +256,15 @@ export function createChannelRoutes(deps: {
       if (!message) {
         return jsonError(c, 400, "invalid_request");
       }
-      return c.json(toMessage(message), 201);
+      const view = toMessage(message);
+      publishMessageCreated(channelId.data, {
+        id: view.id,
+        body: view.body,
+        authorKind: view.authorKind,
+        authorUserId: view.authorUserId,
+        createdAt: view.createdAt,
+      });
+      return c.json(view, 201);
     } catch (error) {
       const code =
         typeof error === "object" && error !== null && "code" in error
@@ -269,6 +279,41 @@ export function createChannelRoutes(deps: {
       }
       return jsonError(c, 409, "idempotency_conflict");
     }
+  });
+
+  app.get("/channels/:id/events", async (c) => {
+    const user = await requireUser(c, deps.sql, deps.sessionSecret);
+    if (isResponse(user)) {
+      return user;
+    }
+    const channelId = z.string().uuid().safeParse(c.req.param("id"));
+    if (!channelId.success) {
+      return jsonError(c, 404, "not_found");
+    }
+    if (!(await memberChannel(deps.sql, channelId.data, user.id))) {
+      return jsonError(c, 404, "not_found");
+    }
+
+    return streamSSE(c, async (stream) => {
+      let open = true;
+      const unsubscribe = subscribe(channelId.data, (event) => {
+        void stream
+          .writeSSE({
+            event: "message.created",
+            data: JSON.stringify(event),
+          })
+          .catch(() => {
+            open = false;
+          });
+      });
+      stream.onAbort(() => {
+        open = false;
+        unsubscribe();
+      });
+      while (open) {
+        await stream.sleep(1000);
+      }
+    });
   });
 
   return app;

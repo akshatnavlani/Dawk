@@ -215,4 +215,146 @@ describe("channels", () => {
       true,
     );
   });
+
+  test("two members receive message.created and a stranger cannot subscribe", async () => {
+    const ownerCookie = await signup(app, emailAddress());
+    const memberEmail = emailAddress();
+    const memberCookie = await signup(app, memberEmail);
+    const strangerCookie = await signup(app, emailAddress());
+    const project = await createProject(app, ownerCookie);
+    const member = await sql<{ id: string }[]>`
+      select id from users where email = ${memberEmail}
+    `;
+    const memberId = member[0]?.id;
+    if (!memberId) {
+      throw new Error("member missing");
+    }
+    await sql`
+      insert into memberships (project_id, user_id, role)
+      values (${project.id}::uuid, ${memberId}::uuid, 'member')
+    `;
+    const channelId = project.orchestrator.channelId;
+
+    const denied = await app.request(`/channels/${channelId}/events`, {
+      headers: { cookie: strangerCookie },
+    });
+    expect(denied.status).toBe(404);
+    const anonymous = await app.request(`/channels/${channelId}/events`);
+    expect(anonymous.status).toBe(401);
+
+    const ownerStream = await app.request(`/channels/${channelId}/events`, {
+      headers: { cookie: ownerCookie },
+    });
+    const memberStream = await app.request(`/channels/${channelId}/events`, {
+      headers: { cookie: memberCookie },
+    });
+    expect(ownerStream.status).toBe(200);
+    expect(memberStream.status).toBe(200);
+    const ownerEvent = readEvent(ownerStream);
+    const memberEvent = readEvent(memberStream);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const posted = await app.request(`/channels/${channelId}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: ownerCookie },
+      body: JSON.stringify({ body: "Live hello" }),
+    });
+    expect(posted.status).toBe(201);
+    const saved = (await posted.json()) as { id: string; body: string };
+    const [ownerText, memberText] = await Promise.all([
+      ownerEvent,
+      memberEvent,
+    ]);
+    expect(ownerText).toContain("event: message.created");
+    expect(memberText).toContain(saved.id);
+    expect(memberText).toContain("Live hello");
+
+    const key = `replay-${crypto.randomUUID()}`;
+    const replayStream = await app.request(`/channels/${channelId}/events`, {
+      headers: { cookie: memberCookie },
+    });
+    const replayText = collectFor(replayStream, 700);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await app.request(`/channels/${channelId}/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie: ownerCookie,
+        "idempotency-key": key,
+      },
+      body: JSON.stringify({ body: "Only once" }),
+    });
+    await app.request(`/channels/${channelId}/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie: ownerCookie,
+        "idempotency-key": key,
+      },
+      body: JSON.stringify({ body: "Only once" }),
+    });
+    expect((await replayText).split("event: message.created").length - 1).toBe(
+      1,
+    );
+  });
 });
+
+async function collectFor(
+  response: Response,
+  timeoutMs: number,
+): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error("missing stream");
+  }
+  const decoder = new TextDecoder();
+  let text = "";
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const next = await Promise.race([
+      reader.read(),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 100)),
+    ]);
+    if (next === null) {
+      continue;
+    }
+    if (next.done) {
+      break;
+    }
+    text += decoder.decode(next.value);
+  }
+  await reader.cancel();
+  return text;
+}
+
+async function readEvent(
+  response: Response,
+  timeoutMs = 3000,
+): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error("missing stream");
+  }
+  const decoder = new TextDecoder();
+  let text = "";
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const next = await Promise.race([
+      reader.read(),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 200)),
+    ]);
+    if (next === null) {
+      continue;
+    }
+    if (next.done) {
+      break;
+    }
+    text += decoder.decode(next.value);
+    if (text.includes("event: message.created")) {
+      await reader.cancel();
+      return text;
+    }
+  }
+  await reader.cancel();
+  return text;
+}

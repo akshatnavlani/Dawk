@@ -142,4 +142,4 @@ Do not commit `.env`, API keys, passwords, or session tokens. `SESSION_SECRET` a
 
 ## Scope right now
 
-Local only. Members can post in a project channel and see that history after reload. Live updates, invites, and agents that run come in later milestones. Hosting vendors stay undecided until M13.
+Local only. Members on the same channel see a new message without reloading. Invites and agents that run come in later milestones. Hosting vendors stay undecided until M13.
