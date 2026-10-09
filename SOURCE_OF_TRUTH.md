@@ -8,9 +8,9 @@
 | Project name                       | Dawk (**Assumption** A-001 — inferred from Git remote; not yet confirmed by owner)                                                                                                       |
 | Document purpose                   | Canonical record of requirements, architecture, decisions, feasibility, and open questions for planning. Not an implementation guide for code.                                           |
 | Last updated                       | 2026-10-09                                                                                                                                                                               |
-| Current planning phase             | **Phase F/G: Implementation planning** (design accepted; execution plan drafting) |
-| Current status                     | Phase-1 local impl planning ready. IMP-SEC-001 + IMP-Q-002 accepted. Coding ban still active until owner explicitly lifts ADR-000. |
-| Known limitations of this document | No SQL DDL; no code. Free-tier host vendors intentionally undecided until M13. |
+| Current planning phase             | **Phase 1 implementation, M2** (local auth; design remains in this document) |
+| Current status                     | Coding authorized for Phase 1 local work from M0 (2026-10-09, ADR-027). IMP-SEC-001 + IMP-Q-002 accepted. M13 still waits on HOST-1. |
+| Known limitations of this document | §11 stays conceptual. Phase 1 DDL is `apps/api/migrations` (M1–M2). Project APIs start at M3. Free-tier host vendors intentionally undecided until M13 (no vendor lock-in). |
 
 
 ## 2. Executive Summary
@@ -823,8 +823,10 @@ Owner creates project → briefs Orchestrator → planning in Orchestrator chann
 | GET | `/auth/magic-link/consume` | Consume token → session | Public (token) |
 | GET | `/auth/google/start` | Begin Google OAuth | Public |
 | GET | `/auth/google/callback` | OAuth callback | Public |
+| GET | `/auth/session` | Current session email | User |
 | POST | `/auth/logout` | End session | User |
-| PATCH | `/auth/email` | Verified change-email flow | User |
+| PATCH | `/auth/email` | Start verified change-email | User |
+| GET | `/auth/email/verify` | Consume change-email token | Public (token) |
 
 #### Projects & members — `API-PROJ`
 
@@ -912,7 +914,7 @@ Owner creates project → briefs Orchestrator → planning in Orchestrator chann
 
 ## 11. Data Architecture
 
-**Status:** Phase-1 conceptual model **Accepted** (Track B / Q-032). Not SQL DDL.
+**Status:** Phase-1 conceptual model **Accepted** (Track B / Q-032). This section is not SQL DDL. The M1 DDL lives in `apps/api/migrations`.
 
 ### Entity overview
 
@@ -1271,7 +1273,7 @@ Phase 3 adds sandbox pool with allocate → work → hibernate/release.
 
 | ID       | Decision                                                                                                                                                                                                                                                                                                            | Status                                                                               |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| ADR-000  | Session is planning-only: no implementation code or executable infrastructure definitions until the owner explicitly changes that constraint.                                                                                                                                                                       | **Accepted**                                                                         |
+| ADR-000  | Session is planning-only: no implementation code or executable infrastructure definitions until the owner explicitly changes that constraint.                                                                                                                                                                       | **Superseded** (2026-10-09) — planning-only ban no longer blocks Phase 1 implementation from M0. See ADR-027. |
 | ADR-001  | Constraints and skills known. Stack proposed as ADR-015 (awaiting accept). Then draft Phase-1 HLD.                                                                                                                                                                                                                  | **Superseded for gating** — proceed on ADR-014/015                                   |
 | ADR-014  | Phase-1 architecture must be buildable/maintainable by 2 people; prefer free-tier-capable hosting for initial test/MVP exposure; design for later move to paid hosting without rewrite; avoid unnecessary vendor lock-in; no artificial deadline but keep scope ruthlessly to ADR-005.                              | **Accepted** (derived from owner constraints 2026-10-09)                             |
 | ADR-015  | Phase-1 stack: **Next.js + Tailwind + TypeScript** (UI); **Hono on Bun** (API + agent workers); **Postgres** (sole primary DB); **Zod** for validation/structured parsing. **Defer:** Redis, MongoDB, FastAPI, web3. Realtime: SSE or websocket on Hono first; Redis later if needed. LLM via TS SDKs + Owner BYOK. | **Accepted** (owner 2026-10-09)                                                      |
@@ -1297,6 +1299,7 @@ Phase 3 adds sandbox pool with allocate → work → hibernate/release.
 | ADR-010a | Phase 3 coding sandboxes use allocate → work → hibernate/release; workspace artifacts preserved so reopen does not lose files.                                                                                                                                                                                      | **Accepted** (owner 2026-10-09)                                                      |
 | ADR-011  | Phase 1: all project LLM calls use the project **Owner’s** BYOK credentials. Members do not attach billing keys. (Multiple *Owner* provider credentials allowed — see ADR-026. Employee/multi-person keys remain later — FR-024.) | **Accepted** (clarified 2026-10-09) |
 | ADR-026  | Owner may attach multiple provider API credentials per project; set primary + fallbacks / manual switch on failure or marked exhaustion; assign provider+model **per agent**. Exhaustion auto-detect is best-effort from provider errors (**Unverified** per vendor). Context remains platform-owned. | **Accepted** (owner 2026-10-09) |
+| ADR-027  | Phase 1 local implementation is authorized from M0 onward, in milestone order (`PHASE_1_IMPLEMENTATION_PLAN.md`). SEC-CHECK remains binding. M13 still waits on HOST-1. Phase 2–4 stay out of scope. | **Accepted** (owner 2026-10-09) |
 | ADR-012  | Agent/project context is owned by Dawk durable storage, not by the LLM provider API key. Key rotation or key swap must not wipe chat/plans/memory.                                                                                                                                                                  | **Accepted**                                                                         |
 | ADR-013  | Credential identity never owns context (ADR-012). Phase 1: multiple **Owner** provider credentials + per-agent routing (ADR-026). Later: optional multi-person keys (FR-024). | **Accepted** — superseded in part by ADR-026 for “single key only” wording |
 
@@ -1385,8 +1388,8 @@ Confidence: **medium** on posture; **low** on specific $ until stack + usage kno
 | Integration verification  | **Partial** — vendors identified; live limits not re-verified this session |
 | Security review           | **Partial** — threats noted; formal pass not done |
 | Acceptance criteria       | **Partial** — SC-001..012 accepted |
-| Outstanding blockers      | Owner lift ADR-000 to start coding; HOST-1 before M13 only |
-| Explicit go/no-go         | **No-go** until owner lifts ADR-000 planning-only ban |
+| Outstanding blockers      | HOST-1 before M13 only. Local coding (M0–M12) is unblocked. |
+| Explicit go/no-go         | **Go for M0–M12 local.** M13 remains **no-go** until HOST-1. |
 
 
 ## 21. Change Log
@@ -1433,5 +1436,8 @@ Confidence: **medium** on posture; **low** on specific $ until stack + usage kno
 | 2026-10-09 | Pointed SoT §13 at Phase-1 SEC-CHECK in impl plan; IMP-SEC-001 pending. | Owner asked for security checklist. | IMP-SEC-001 |
 | 2026-10-09 | Accepted IMP-SEC-001 + IMP-Q-002. Local Phase-1 planning ready pending ADR-000 lift. | Owner accepted security bar. | IMP-SEC-001, IMP-Q-002, ADR-000 |
 | 2026-10-09 | Added project skill `.cursor/skills/dawk-system-architect` for /dawk-system-architect design sessions. | Owner asked for reusable system-design agent. | — |
+| 2026-10-09 | ADR-000 **Superseded**. ADR-027 accepted: Phase 1 local coding authorized from M0. Go for M0–M12 local; M13 still waits on HOST-1. | Owner handoff lifted the planning-only ban for Phase 1 implementation. | ADR-000, ADR-027, IMP-Q-003 |
+| 2026-10-09 | M1 DDL pointer: Phase 1 tables live in `apps/api/migrations`. §11 stays conceptual. | Schema milestone implemented the accepted entity model. | §11, T-002 |
+| 2026-10-09 | M2 auth: session, magic-link, Google, and change-email tables and routes. Added `GET /auth/session` and `GET /auth/email/verify`. | UF-001 needs a cookie lookup and a second step to prove the new email. | API-AUTH, FR-025, FR-029, T-003, T-004 |
 
 

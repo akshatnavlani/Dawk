@@ -1,0 +1,25 @@
+{
+  "name": "dawk",
+  "private": true,
+  "packageManager": "bun@1.4.2",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c blue,magenta \"bun run dev:api\" \"bun run dev:web\"",
+    "dev:api": "bun run --cwd apps/api dev",
+    "dev:web": "bun run --cwd apps/web dev",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "typecheck": "bun run --cwd apps/api typecheck && bun run --cwd apps/web typecheck",
+    "db:ping": "bun run --cwd apps/api db:ping",
+    "db:migrate": "bun run --cwd apps/api db:migrate",
+    "db:migrate:down": "bun run --cwd apps/api db:migrate:down",
+    "db:test:schema": "bun run --cwd apps/api db:test:schema",
+    "test": "bun run --cwd apps/api test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.15",
+    "concurrently": "^10.0.6"
+  }
+}

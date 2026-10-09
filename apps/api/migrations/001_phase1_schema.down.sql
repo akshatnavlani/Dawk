@@ -1,0 +1,20 @@
+DROP TABLE IF EXISTS decision_supports;
+DROP TABLE IF EXISTS instruction_queue_items;
+DROP TABLE IF EXISTS conflicts;
+DROP TABLE IF EXISTS agent_summaries;
+DROP TABLE IF EXISTS decisions;
+DROP TABLE IF EXISTS plans;
+DROP TABLE IF EXISTS agent_run_steps;
+DROP TABLE IF EXISTS messages;
+DROP TABLE IF EXISTS agent_runs;
+DROP TABLE IF EXISTS channels;
+DROP TABLE IF EXISTS agents;
+DROP TABLE IF EXISTS skills;
+DROP TABLE IF EXISTS provider_credentials;
+DROP TABLE IF EXISTS invites;
+DROP TABLE IF EXISTS project_briefs;
+DROP TABLE IF EXISTS memberships;
+DROP TABLE IF EXISTS projects;
+DROP TABLE IF EXISTS users;
+
+DROP FUNCTION IF EXISTS decisions_same_project();

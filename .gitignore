@@ -1,2 +1,12 @@
 # Obsidian vault metadata (local editor)
 .obsidian/
+
+node_modules/
+dist/
+.next/
+*.tsbuildinfo
+*.log
+
+.env
+.env.*
+!.env.example

@@ -4,10 +4,10 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Ready for coding-ban lift decision** (local M0–M12 path) |
+| Status | **Go for M0–M12 local** (M13 still waits on HOST-1) |
 | Created | 2026-10-09 |
 | Last updated | 2026-10-09 |
-| Coding ban | **Active** (SoT ADR-000) — no application/infra code in this phase of work |
+| Coding ban | **Lifted** for Phase 1 local implementation M0–M12 (SoT ADR-000 superseded; ADR-027). M13 still gated on HOST-1. |
 | Related SoT | `SOURCE_OF_TRUTH.md` |
 
 ---
@@ -120,7 +120,7 @@ Phase 1 is **complete** only when:
 | Stack (Next/Hono/Bun/Postgres/Zod) | **Ready** | ADR-015 | Tooling install | M0 |
 | HLD + Channels + Brief | **Ready** | ADR-022/023/025 | — | Freeze |
 | Flows UF-001..012 | **Ready** | Accepted | — | Drive tests |
-| Data model (conceptual) | **Ready with assumptions** | Accepted; no SQL DDL yet | Migration design in M1 | Implement schema from §11 |
+| Data model (conceptual) | **Ready** | §11 accepted; M1 DDL in `apps/api/migrations` | — | M2 uses the schema |
 | Agent runtime Track D | **Ready** | D7 / IMP-NUM-001 **Accepted** | — | Freeze |
 | Internal APIs Track C | **Ready** | Accepted contracts | — | Implement against §10 |
 | Google OAuth | **At risk** | Decision made; app credentials not created; vendor behavior not re-verified this session | Google Cloud OAuth client | Spike: create clients; verify redirect |
@@ -130,9 +130,9 @@ Phase 1 is **complete** only when:
 | Free-tier hosting topology | **Ready with assumptions** | Owner chose **defer** (IMP-Q-001 option 3): local M0–M12 first; friends via local/tunnel; vendor pick at M13 | ADR-014, SC-010 | Document assumption; run HOST-1 before M13 |
 | Encryption at rest for keys | **Ready with assumptions** | Required; algo/KMS not specified | Env secret for key encryption | Decide envelope encryption with app secret for MVP |
 | Contradiction detection quality | **At risk** | High risk in SoT; ledger helps but LLM miss possible | Instruction ledger design | Ship ledger + Owner resolve; don’t overclaim NLP |
-| Security formal pass | **Ready with assumptions** | Threats listed; no dedicated pass yet | This plan §L | Complete security checklist before coding ban lift |
+| Security formal pass | **Ready with assumptions** | SEC-CHECK accepted (IMP-SEC-001) | This plan §L | Re-check rows as milestones complete; again at M12 and M13 |
 | Phase 2–4 | **N/A** | Out of Phase 1 | — | Do not implement |
-| Coding ban lift | **Blocked** by process | ADR-000 until owner says so | Plan complete + owner go | Explicit later decision |
+| Coding ban lift | **Unblocked** | ADR-000 superseded; ADR-027 accepted (2026-10-09) | SEC-CHECK remains binding | Implement M0, then continue milestone order |
 
 ### Four prior options — disposition
 
@@ -140,8 +140,8 @@ Phase 1 is **complete** only when:
 | --- | --- |
 | 1. Free-tier hosting | **Required before deploy milestones** — treat as blocker for M7+; local M0–M6 can proceed with assumptions |
 | 2. Numeric defaults | **Required before agent loop coding** — adopt D7 as provisional or owner-adjust; spend cap is Owner-set (no platform default $ required) |
-| 3. Security/risk review | **Required before coding ban lift** — focused checklist in §L; not a redesign |
-| 4. Stop / lift coding ban later | **Separate explicit decision** — keep ADR-000 until owner lifts; plan can complete first |
+| 3. Security/risk review | **Met** — SEC-CHECK accepted (IMP-SEC-001); re-check at M12 and M13 |
+| 4. Stop / lift coding ban later | **Done** — owner lifted ADR-000 (ADR-027, IMP-Q-003) for M0–M12 local |
 
 ---
 
@@ -633,7 +633,7 @@ High-level tasks for critical path (expand when coding ban lifts):
 3. Update SoT first, then this plan.  
 4. Log in both change logs.  
 5. Never let this plan override SoT silently.  
-6. Coding ban remains until owner explicitly lifts ADR-000.
+6. Coding ban is lifted for Phase 1 local implementation M0–M12 only (IMP-Q-003, ADR-027). M13 stays gated on HOST-1. Phase 2–4 stay out. Design sessions still must not expand scope.
 
 ---
 
@@ -645,7 +645,7 @@ High-level tasks for critical path (expand when coding ban lifts):
 | **IMP-NUM-001** | Accept D7 defaults: max_iterations=8, message window=20, Q&A max=3? | M7 | **Accepted** (owner 2026-10-09); Owner spend cap remains Owner-chosen |
 | IMP-Q-002 | Credential encryption: app-level envelope with `CREDENTIALS_ENCRYPTION_KEY` for MVP? | M6 | **Accepted** (owner 2026-10-09) |
 | **IMP-SEC-001** | Accept Phase-1 SEC-CHECK (A–G) as security bar? | Before ADR-000 lift | **Accepted** (owner 2026-10-09) |
-| IMP-Q-003 | Lift ADR-000 coding ban? | Actual coding | **Pending** — requires explicit owner statement |
+| IMP-Q-003 | Lift ADR-000 coding ban? | Actual coding | **Accepted — coding ban lifted** (owner handoff 2026-10-09). Go for M0–M12 local. |
 
 ---
 
@@ -658,9 +658,9 @@ High-level tasks for critical path (expand when coding ban lifts):
 | Hosting topology decided | **Deferred by design** (option 3) — not blocking M0–M12 |
 | Loop numeric defaults decided | **Met** (IMP-NUM-001) |
 | Security checklist accepted | **Met** (IMP-SEC-001 + IMP-Q-002) |
-| Owner lifts ADR-000 | **Not met** |
+| Owner lifts ADR-000 | **Met** (ADR-027, 2026-10-09) |
 
-**Current recommendation:** Phase-1 **local** implementation planning is ready. **Still no-go for coding** until you explicitly lift ADR-000. M13 still gated on HOST-1 later.
+**Current recommendation:** **Go for M0–M12 local.** Follow milestone order. M13 stays gated on HOST-1.
 
 ---
 
@@ -674,3 +674,7 @@ High-level tasks for critical path (expand when coding ban lifts):
 | 2026-10-09 | Added Phase-1 SEC-CHECK (A–G); IMP-SEC-001 pending owner accept | Owner requested security checklist |
 | 2026-10-09 | Accepted IMP-SEC-001 + IMP-Q-002; plan ready for ADR-000 lift decision | Owner accepted security bar + encryption approach |
 | 2026-10-09 | Noted handoff to new agent for M0; skill dawk-system-architect added for future design | Context window ending | IMP-Q-003 |
+| 2026-10-09 | IMP-Q-003 accepted — coding ban lifted. Go for M0–M12 local. ADR-000 superseded by ADR-027. | Owner handoff authorized Phase 1 implementation from M0 | IMP-Q-003, ADR-000, ADR-027 |
+| 2026-10-09 | T-001 done: local Next + Hono/Bun + Postgres health check. M1 not started. | M0 foundation is runnable | T-001, M0, SEC-CHECK A4 |
+| 2026-10-09 | T-002 done: Phase 1 schema migrates up and down; constraint checks pass. M2 not started. | M1 DoD: §11 entities are representable | T-002, M1, §11 |
+| 2026-10-09 | T-003 and T-004 done: password, magic-link, Google, sessions, logout, and verified change-email. Clarified `GET /auth/session` and `GET /auth/email/verify`. M3 not started. | M2 DoD: three local login methods | T-003, T-004, M2, API-AUTH, SEC-CHECK B1 B2 B4 B5 B6 D1 D3 |
