@@ -563,6 +563,17 @@ async function main(): Promise<void> {
     }
 
     await migrateDown(sql, { force: true });
+    if (await indexExists(sql, "plans_one_awaiting")) {
+      throw new Error("Plan down migration left the awaiting index");
+    }
+    if (!(await skillSlugExists(sql, "orchestrator"))) {
+      throw new Error("Plan down migration removed the orchestrator pack");
+    }
+    if (!(await columnExists(sql, "provider_credentials", "last_four"))) {
+      throw new Error("Plan down migration removed last_four");
+    }
+
+    await migrateDown(sql, { force: true });
     if (await skillSlugExists(sql, "orchestrator")) {
       throw new Error("Skill down migration left the orchestrator pack");
     }
@@ -599,10 +610,11 @@ async function main(): Promise<void> {
       !(await tableExists(sql, "users")) ||
       !(await tableExists(sql, "sessions")) ||
       !(await columnExists(sql, "provider_credentials", "last_four")) ||
-      !(await skillSlugExists(sql, "orchestrator"))
+      !(await skillSlugExists(sql, "orchestrator")) ||
+      !(await indexExists(sql, "plans_one_awaiting"))
     ) {
       throw new Error(
-        "Up migration did not restore users, sessions, last_four, and skills",
+        "Up migration did not restore users, sessions, last_four, skills, and plans",
       );
     }
 

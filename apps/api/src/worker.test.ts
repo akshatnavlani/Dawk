@@ -780,4 +780,229 @@ describe("worker", () => {
     `;
     expect(count[0]?.n).toBe(1);
   });
+
+  test("a plan pauses the agent until the owner approves", async () => {
+    seen.length = 0;
+    let calls = 0;
+    handler = () => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          text: JSON.stringify({
+            status: "plan",
+            notes: "Drafting the plan.",
+            plan: {
+              summary: "Ship a table.",
+              steps: ["Draw the layout", "Pick the cards"],
+            },
+          }),
+          tokenIn: 8,
+          tokenOut: 6,
+          costEst: 0.01,
+        };
+      }
+      return finalResult("Continuing the approved plan.");
+    };
+    const ownerEmail = emailAddress();
+    const ownerCookie = await signup(app, ownerEmail);
+    const memberEmail = emailAddress();
+    const memberCookie = await signup(app, memberEmail);
+    const strangerCookie = await signup(app, emailAddress());
+    const project = await createProject(app, ownerCookie);
+    const member = await sql<{ id: string }[]>`
+      select id from users where email = ${memberEmail}
+    `;
+    const memberId = member[0]?.id;
+    if (!memberId) {
+      throw new Error("member missing");
+    }
+    await sql`
+      insert into memberships (project_id, user_id, role)
+      values (${project.id}::uuid, ${memberId}::uuid, 'member')
+    `;
+    await saveKey(app, ownerCookie, project.id, {
+      provider: "anthropic",
+      label: "Claude",
+      secret,
+      isPrimary: true,
+    });
+    const events: string[] = [];
+    const stop = subscribe(project.orchestrator.channelId, (event) => {
+      events.push(event.event);
+    });
+    const posted = await postMessage(
+      app,
+      ownerCookie,
+      project.orchestrator.channelId,
+      "Make a plan",
+    );
+    expect(posted.status).toBe(201);
+    await settle();
+    stop();
+    expect(seen).toHaveLength(1);
+    expect(events).toContain("plan.updated");
+    const agent = await sql<{ status: string }[]>`
+      select status from agents where id = ${project.orchestrator.agentId}::uuid
+    `;
+    expect(agent[0]?.status).toBe("awaiting_approval");
+    const plans = await app.request(
+      `/agents/${project.orchestrator.agentId}/plans/latest`,
+      { headers: { cookie: memberCookie } },
+    );
+    expect(plans.status).toBe(200);
+    const planBody = (await plans.json()) as {
+      plan: { id: string; status: string };
+    };
+    expect(planBody.plan.status).toBe("awaiting");
+
+    const comment = await postMessage(
+      app,
+      memberCookie,
+      project.orchestrator.channelId,
+      "Please keep it small",
+    );
+    const commentBody = (await comment.json()) as { run: { error?: string } };
+    expect(commentBody.run.error).toBe("awaiting_approval");
+    await settle();
+    expect(seen).toHaveLength(1);
+
+    const memberApprove = await app.request(
+      `/plans/${planBody.plan.id}/approve`,
+      { method: "POST", headers: { cookie: memberCookie } },
+    );
+    expect(memberApprove.status).toBe(403);
+    const memberReject = await app.request(
+      `/plans/${planBody.plan.id}/reject`,
+      { method: "POST", headers: { cookie: memberCookie } },
+    );
+    expect(memberReject.status).toBe(403);
+    const strangerApprove = await app.request(
+      `/plans/${planBody.plan.id}/approve`,
+      { method: "POST", headers: { cookie: strangerCookie } },
+    );
+    expect(strangerApprove.status).toBe(404);
+
+    const approved = await app.request(`/plans/${planBody.plan.id}/approve`, {
+      method: "POST",
+      headers: { cookie: ownerCookie },
+    });
+    expect(approved.status).toBe(200);
+    await settle();
+    expect(seen).toHaveLength(2);
+    expect(seen[1]?.user.includes("approved:")).toBe(true);
+    expect(seen[1]?.user.includes("Ship a table.")).toBe(true);
+    const owner = await sql<{ user_id: string }[]>`
+      select user_id from memberships
+      where project_id = ${project.id}::uuid and role = 'owner'
+    `;
+    const stored = await sql<{ status: string; resolved_by_user_id: string }[]>`
+      select status, resolved_by_user_id
+      from plans
+      where id = ${planBody.plan.id}::uuid
+    `;
+    expect(stored[0]?.status).toBe("approved");
+    expect(stored[0]?.resolved_by_user_id).toBe(owner[0]?.user_id);
+
+    const again = await app.request(`/plans/${planBody.plan.id}/approve`, {
+      method: "POST",
+      headers: { cookie: ownerCookie },
+    });
+    expect(again.status).toBe(200);
+    await settle();
+    expect(seen).toHaveLength(2);
+  });
+
+  test("owner reject starts one revision and a second reject does not", async () => {
+    seen.length = 0;
+    let calls = 0;
+    handler = () => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          text: JSON.stringify({
+            status: "plan",
+            notes: "Drafting the plan.",
+            plan: { summary: "Try again.", steps: ["Revise the layout"] },
+          }),
+          tokenIn: 8,
+          tokenOut: 6,
+          costEst: 0.01,
+        };
+      }
+      return finalResult("Stopping after rejection.");
+    };
+    const cookie = await signup(app, emailAddress());
+    const project = await createProject(app, cookie);
+    await saveKey(app, cookie, project.id, {
+      provider: "anthropic",
+      label: "Claude",
+      secret,
+      isPrimary: true,
+    });
+    const posted = await postMessage(
+      app,
+      cookie,
+      project.orchestrator.channelId,
+      "Plan it",
+    );
+    expect(posted.status).toBe(201);
+    await settle();
+    const latest = await app.request(
+      `/agents/${project.orchestrator.agentId}/plans/latest`,
+      { headers: { cookie } },
+    );
+    const plan = (await latest.json()) as { plan: { id: string } };
+    const rejected = await app.request(`/plans/${plan.plan.id}/reject`, {
+      method: "POST",
+      headers: { cookie },
+    });
+    expect(rejected.status).toBe(200);
+    await settle();
+    expect(seen).toHaveLength(2);
+    const second = await app.request(`/plans/${plan.plan.id}/reject`, {
+      method: "POST",
+      headers: { cookie },
+    });
+    expect(second.status).toBe(200);
+    await settle();
+    expect(seen).toHaveLength(2);
+    const stored = await sql<{ status: string }[]>`
+      select status from plans where id = ${plan.plan.id}::uuid
+    `;
+    expect(stored[0]?.status).toBe("rejected");
+  });
+
+  test("approve of a superseded draft is rejected both times", async () => {
+    seen.length = 0;
+    handler = () => finalResult();
+    const cookie = await signup(app, emailAddress());
+    const project = await createProject(app, cookie);
+    const inserted = await sql<{ id: string }[]>`
+      insert into plans (agent_id, status, body)
+      values (
+        ${project.orchestrator.agentId}::uuid,
+        'draft',
+        ${sql.json({ summary: "Old", steps: ["one"] })}
+      )
+      returning id
+    `;
+    const planId = inserted[0]?.id;
+    if (!planId) {
+      throw new Error("plan missing");
+    }
+    const first = await app.request(`/plans/${planId}/approve`, {
+      method: "POST",
+      headers: { cookie },
+    });
+    expect(first.status).toBe(409);
+    const body = (await first.json()) as { error: string };
+    expect(body.error).toBe("plan_superseded");
+    const second = await app.request(`/plans/${planId}/approve`, {
+      method: "POST",
+      headers: { cookie },
+    });
+    expect(second.status).toBe(409);
+    await settle();
+    expect(seen).toHaveLength(0);
+  });
 });

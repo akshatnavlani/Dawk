@@ -8,7 +8,7 @@
 | Project name                       | Dawk (**Assumption** A-001 — inferred from Git remote; not yet confirmed by owner)                                                                                                       |
 | Document purpose                   | Canonical record of requirements, architecture, decisions, feasibility, and open questions for planning. Not an implementation guide for code.                                           |
 | Last updated                       | 2026-10-09                                                                                                                                                                               |
-| Current planning phase             | **Phase 1 implementation, M7** (agent worker loop; design remains in this document) |
+| Current planning phase             | **Phase 1 implementation, M8** (plan approval; design remains in this document) |
 | Current status                     | Coding authorized for Phase 1 local work from M0 (2026-10-09, ADR-027). IMP-SEC-001 + IMP-Q-002 accepted. M13 still waits on HOST-1. |
 | Known limitations of this document | §11 stays conceptual. Phase 1 DDL is `apps/api/migrations` (M1–M2). Project APIs start at M3. Free-tier host vendors intentionally undecided until M13 (no vendor lock-in). |
 
@@ -1444,5 +1444,6 @@ Confidence: **medium** on posture; **low** on specific $ until stack + usage kno
 | 2026-10-09 | M5 live updates: members on one channel receive `message.created`. No Redis. Agent runs stay later. | UF-011 for saved messages. | API-CHAT, T-007, SEC-CHECK C5 |
 | 2026-10-09 | M6 credentials: Owner keys encrypted at rest, masked in the API, with primary, fallback, and per-agent routing. No LLM calls. | FR-038, FR-039, IMP-Q-002. | API-CRED, T-008, SEC-CHECK A1, A2, A6 |
 | 2026-10-09 | M7 worker: Orchestrator runs pack context, loop at most 8 calls, and stream traces. Default models claude-sonnet-5-5 and gpt-6-astra. Live provider call not verified. | ADR-020, ADR-021, ADR-026, FR-030..033. | T-009, M7, UF-005, SEC-CHECK A3, D2, D4, D5, G1, G3, G4 |
+| 2026-10-09 | M8 plans: an awaiting plan pauses the agent. Only the Owner can approve, and that approval starts one continuation. | UF-007, SC-004. | T-010, M8, API-AGENT, SEC-CHECK C2 |
 
 

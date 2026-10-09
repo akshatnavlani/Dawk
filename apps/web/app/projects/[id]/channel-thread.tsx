@@ -1,7 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { API_ORIGIN, buttonClass, fieldClass } from "../../auth-shared";
+import { useEffect, useRef, useState } from "react";
+import {
+  API_ORIGIN,
+  buttonClass,
+  fieldClass,
+  messageFor,
+} from "../../auth-shared";
 
 type ChatMessage = {
   id: string;
@@ -12,6 +17,7 @@ type ChatMessage = {
 
 type Channel = {
   id: string;
+  agentId: string;
   name: string;
   kind: string;
   status: string;
@@ -24,6 +30,16 @@ type RunStep = {
   model: string | null;
   tokenIn: number | null;
   tokenOut: number | null;
+};
+
+type PlanView = {
+  id: string;
+  agentId: string;
+  status: string;
+  body: {
+    summary: string;
+    steps: string[];
+  };
 };
 
 type RunView = {
@@ -42,6 +58,7 @@ const failureText: Record<string, string> = {
   missing_skill: "This agent has no skill pack.",
   invalid_response: "The model reply could not be read.",
   agent_busy: "The Orchestrator is already working.",
+  awaiting_approval: "A plan is waiting for the owner.",
   rate_limited: "Too many runs were started. Try again later.",
 };
 
@@ -60,7 +77,13 @@ function mergeMessages(
   return next;
 }
 
-export function ChannelThread({ projectId }: { projectId: string }) {
+export function ChannelThread({
+  projectId,
+  role,
+}: {
+  projectId: string;
+  role: "owner" | "member";
+}) {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [channelId, setChannelId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -70,6 +93,9 @@ export function ChannelThread({ projectId }: { projectId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [unread, setUnread] = useState<Record<string, number>>({});
   const [run, setRun] = useState<RunView | null>(null);
+  const [plan, setPlan] = useState<PlanView | null>(null);
+  const channelsRef = useRef(channels);
+  channelsRef.current = channels;
 
   useEffect(() => {
     void (async () => {
@@ -99,6 +125,7 @@ export function ChannelThread({ projectId }: { projectId: string }) {
     }
     let cancelled = false;
     setRun(null);
+    setPlan(null);
     async function loadHistory() {
       const response = await fetch(
         `${API_ORIGIN}/channels/${channelId}/messages`,
@@ -124,24 +151,27 @@ export function ChannelThread({ projectId }: { projectId: string }) {
       }
       const body = (await response.json()) as { run?: RunView | null };
       setRun(body.run ?? null);
-      const status = body.run?.status;
-      setChannels((current) =>
-        current.map((channel) =>
-          channel.id === channelId
-            ? {
-                ...channel,
-                status:
-                  status === "pending" || status === "running"
-                    ? "working"
-                    : "idle",
-              }
-            : channel,
-        ),
+    }
+
+    async function loadPlan() {
+      const channel = channelsRef.current.find((item) => item.id === channelId);
+      if (!channel) {
+        return;
+      }
+      const response = await fetch(
+        `${API_ORIGIN}/agents/${channel.agentId}/plans/latest`,
+        { credentials: "include" },
       );
+      if (!response.ok || cancelled) {
+        return;
+      }
+      const body = (await response.json()) as { plan?: PlanView | null };
+      setPlan(body.plan ?? null);
     }
 
     void loadHistory();
     void loadRun();
+    void loadPlan();
 
     const source = new EventSource(
       `${API_ORIGIN}/channels/${channelId}/events`,
@@ -162,10 +192,14 @@ export function ChannelThread({ projectId }: { projectId: string }) {
         void loadRun();
       });
     }
+    source.addEventListener("plan.updated", () => {
+      void loadPlan();
+    });
     source.onopen = () => {
       if (opened) {
         void loadHistory();
         void loadRun();
+        void loadPlan();
       }
       opened = true;
     };
@@ -174,6 +208,34 @@ export function ChannelThread({ projectId }: { projectId: string }) {
       source.close();
     };
   }, [channelId]);
+
+  useEffect(() => {
+    if (!channelId) {
+      return;
+    }
+    setChannels((current) => {
+      let changed = false;
+      const next = current.map((channel) => {
+        if (channel.id !== channelId) {
+          return channel;
+        }
+        const status =
+          run?.status === "pending" || run?.status === "running"
+            ? "working"
+            : plan?.status === "awaiting"
+              ? "awaiting_approval"
+              : run || plan
+                ? "idle"
+                : channel.status;
+        if (status === channel.status) {
+          return channel;
+        }
+        changed = true;
+        return { ...channel, status };
+      });
+      return changed ? next : current;
+    });
+  }, [channelId, plan, run]);
 
   useEffect(() => {
     const others = channels.filter((channel) => channel.id !== channelId);
@@ -250,7 +312,8 @@ export function ChannelThread({ projectId }: { projectId: string }) {
     );
     if (
       message.run?.error === "rate_limited" ||
-      message.run?.error === "agent_busy"
+      message.run?.error === "agent_busy" ||
+      message.run?.error === "awaiting_approval"
     ) {
       setError(failureText[message.run.error] ?? "The run did not start.");
     }
@@ -263,6 +326,26 @@ export function ChannelThread({ projectId }: { projectId: string }) {
       setRun(body.run ?? null);
     }
     setDraft("");
+  }
+
+  async function decide(action: "approve" | "reject") {
+    if (!plan) {
+      return;
+    }
+    setError(null);
+    const response = await fetch(`${API_ORIGIN}/plans/${plan.id}/${action}`, {
+      method: "POST",
+      credentials: "include",
+    });
+    const body = (await response.json()) as {
+      error?: string;
+      plan?: PlanView;
+    };
+    if (!response.ok) {
+      setError(messageFor(body.error ?? null));
+      return;
+    }
+    setPlan(body.plan ?? null);
   }
 
   const selected = channels.find((channel) => channel.id === channelId);
@@ -322,6 +405,42 @@ export function ChannelThread({ projectId }: { projectId: string }) {
             ))
           )}
         </ul>
+        {plan ? (
+          <div className="mt-4 rounded-lg border border-stone-300 bg-stone-50 px-4 py-3">
+            <h3 className="text-sm font-semibold">Plan · {plan.status}</h3>
+            <p className="mt-2 whitespace-pre-wrap text-sm text-stone-800">
+              {plan.body.summary}
+            </p>
+            <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-stone-800">
+              {plan.body.steps.map((step) => (
+                <li key={`${plan.id}-${step}`}>{step}</li>
+              ))}
+            </ol>
+            {plan.status === "awaiting" && role === "owner" ? (
+              <div className="mt-3 flex gap-2">
+                <button
+                  className={buttonClass}
+                  type="button"
+                  onClick={() => void decide("approve")}
+                >
+                  Approve
+                </button>
+                <button
+                  className={buttonClass}
+                  type="button"
+                  onClick={() => void decide("reject")}
+                >
+                  Reject
+                </button>
+              </div>
+            ) : null}
+            {plan.status === "awaiting" && role === "member" ? (
+              <p className="mt-3 text-sm text-stone-600">
+                Only the owner can approve this plan.
+              </p>
+            ) : null}
+          </div>
+        ) : null}
         {run && (run.steps.some((step) => step.notes) || run.failureReason) ? (
           <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
             <h3 className="text-sm font-semibold text-amber-950">Working</h3>

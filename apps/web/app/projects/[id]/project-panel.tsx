@@ -91,7 +91,7 @@ export function ProjectPanel({ projectId }: { projectId: string }) {
           <p className="mt-3 text-stone-600">
             You are the {project.role}. Spend used {project.spendUsed}.
           </p>
-          <ChannelThread projectId={project.id} />
+          <ChannelThread projectId={project.id} role={project.role} />
           {project.role === "owner" ? (
             <CredentialsPanel
               projectId={project.id}

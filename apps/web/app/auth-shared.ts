@@ -22,7 +22,7 @@ const messages: Record<string, string> = {
   not_found: "That project was not found.",
   forbidden: "Only the project owner can do that.",
   credential_not_in_project: "That key belongs to another project.",
-  credential_in_use: "That key is still used by a past run.",
+  plan_superseded: "That plan is no longer the one waiting for approval.",
 };
 
 export function messageFor(code: string | null): string | null {

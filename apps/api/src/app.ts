@@ -11,7 +11,7 @@ import { createCredentialRoutes } from "./credentials/routes";
 import { ping } from "./db";
 import type { Env } from "./env";
 import { createProjectRoutes } from "./projects/routes";
-import { enqueueRun, executeRun } from "./worker/loop";
+import { enqueueRun, executeRun, startContinuation } from "./worker/loop";
 import { createLiveClient, type LlmClient } from "./worker/provider";
 import { createRunRoutes } from "./worker/routes";
 
@@ -83,6 +83,15 @@ export function createApp(deps: AppDeps): Hono {
     encryptionKey: deps.env.CREDENTIALS_ENCRYPTION_KEY,
     llm,
   };
+  const schedule = (runId: string) => {
+    if (deps.scheduleRun) {
+      deps.scheduleRun(runId);
+      return;
+    }
+    void executeRun(workerDeps, runId).catch(() => {
+      console.error("agent run failed");
+    });
+  };
   app.route(
     "/",
     createChannelRoutes({
@@ -97,14 +106,7 @@ export function createApp(deps: AppDeps): Hono {
           { channelId, userId },
         );
         if (started.kind === "started" && "id" in started.run) {
-          const runId = started.run.id;
-          if (deps.scheduleRun) {
-            deps.scheduleRun(runId);
-          } else {
-            void executeRun(workerDeps, runId).catch(() => {
-              console.error("agent run failed");
-            });
-          }
+          schedule(started.run.id);
         }
         return started.run;
       },
@@ -115,6 +117,12 @@ export function createApp(deps: AppDeps): Hono {
     createRunRoutes({
       sql: deps.sql,
       sessionSecret: deps.env.SESSION_SECRET,
+      continueAfterPlan: async (agentId) => {
+        const started = await startContinuation(workerDeps, agentId);
+        if (started.kind === "started" && "id" in started.run) {
+          schedule(started.run.id);
+        }
+      },
     }),
   );
   app.route(

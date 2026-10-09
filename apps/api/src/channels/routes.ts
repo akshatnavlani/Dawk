@@ -138,9 +138,15 @@ export function createChannelRoutes(deps: {
       return jsonError(c, 404, "not_found");
     }
     const channels = await deps.sql<
-      { id: string; name: string; kind: string; status: string }[]
+      {
+        id: string;
+        agent_id: string;
+        name: string;
+        kind: string;
+        status: string;
+      }[]
     >`
-      select channels.id, agents.name, agents.kind, agents.status
+      select channels.id, agents.id as agent_id, agents.name, agents.kind, agents.status
       from channels
       join agents on agents.id = channels.agent_id
       where channels.project_id = ${projectId.data}::uuid
@@ -149,6 +155,7 @@ export function createChannelRoutes(deps: {
     return c.json({
       channels: channels.map((channel) => ({
         id: channel.id,
+        agentId: channel.agent_id,
         name: channel.name,
         kind: channel.kind,
         status: channel.status,

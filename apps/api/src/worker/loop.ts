@@ -13,22 +13,34 @@ import {
 export const MAX_MAIN_ITERATIONS = 8;
 const MESSAGE_WINDOW = 20;
 
+const planBodySchema = z.object({
+  summary: z.string().trim().min(1).max(2000),
+  steps: z.array(z.string().trim().min(1).max(500)).min(1).max(20),
+});
+
 const turnSchema = z
   .object({
-    status: z.enum(["working", "final"]),
+    status: z.enum(["working", "final", "plan"]),
     notes: z.string().trim().min(1).max(4000),
     answer: z.string().trim().min(1).max(8000).optional(),
     summary: z.string().trim().min(1).max(2000).optional(),
+    plan: planBodySchema.optional(),
   })
   .superRefine((value, ctx) => {
-    if (value.status !== "final") {
-      return;
+    if (value.status === "final") {
+      if (!value.answer) {
+        ctx.addIssue({ code: "custom", path: ["answer"], message: "answer" });
+      }
+      if (!value.summary) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["summary"],
+          message: "summary",
+        });
+      }
     }
-    if (!value.answer) {
-      ctx.addIssue({ code: "custom", path: ["answer"], message: "answer" });
-    }
-    if (!value.summary) {
-      ctx.addIssue({ code: "custom", path: ["summary"], message: "summary" });
+    if (value.status === "plan" && !value.plan) {
+      ctx.addIssue({ code: "custom", path: ["plan"], message: "plan" });
     }
   });
 
@@ -37,7 +49,7 @@ type Turn = z.infer<typeof turnSchema>;
 export type RunBody =
   | { id: string }
   | { id: string; error: string }
-  | { error: "rate_limited" | "agent_busy" };
+  | { error: "rate_limited" | "agent_busy" | "awaiting_approval" };
 
 export type EnqueueResult = {
   kind: "started" | "failed" | "skipped";
@@ -64,6 +76,7 @@ type ChannelContext = {
   skillPack: string | null;
   credentialId: string | null;
   modelId: string | null;
+  agentStatus: string;
   llmPaused: boolean;
   spendCap: string | null;
   spendUsed: string;
@@ -99,8 +112,10 @@ function systemPrompt(skill: string): string {
     skill,
     "",
     "Reply with one JSON object and no markdown.",
-    'Keys: status ("working" or "final"), notes (string).',
+    'Keys: status ("working", "final", or "plan"), notes (string).',
     "When status is final, also include answer and summary.",
+    "When status is plan, also include plan with summary and steps.",
+    "A plan is not approved until the owner says so.",
     "status working is a progress note. status final is the channel reply.",
   ].join("\n");
 }
@@ -144,6 +159,7 @@ async function loadContext(
       skill_pack: string | null;
       credential_id: string | null;
       model_id: string | null;
+      agent_status: string;
       llm_paused: boolean;
       spend_cap: string | null;
       spend_used: string;
@@ -156,6 +172,7 @@ async function loadContext(
       skills.system_prompt_pack as skill_pack,
       agents.credential_id,
       agents.model_id,
+      agents.status as agent_status,
       projects.llm_paused,
       projects.spend_cap::text as spend_cap,
       projects.spend_used::text as spend_used
@@ -176,6 +193,7 @@ async function loadContext(
     skillPack: row.skill_pack,
     credentialId: row.credential_id,
     modelId: row.model_id,
+    agentStatus: row.agent_status,
     llmPaused: row.llm_paused,
     spendCap: row.spend_cap,
     spendUsed: row.spend_used,
@@ -301,6 +319,9 @@ export async function enqueueRun(
   if (!context) {
     throw new Error("channel missing");
   }
+  if (context.agentStatus === "awaiting_approval") {
+    return { kind: "skipped", run: { error: "awaiting_approval" } };
+  }
   if (!deps.allow(`run:${context.projectId}:${input.userId}`)) {
     return { kind: "skipped", run: { error: "rate_limited" } };
   }
@@ -412,8 +433,8 @@ async function buildUserPrompt(
   const summary = await sql<{ summary: string }[]>`
     select summary from agent_summaries where agent_id = ${context.agentId}::uuid
   `;
-  const plan = await sql<{ body: unknown }[]>`
-    select body
+  const plan = await sql<{ body: unknown; status: string }[]>`
+    select body, status
     from plans
     where agent_id = ${context.agentId}::uuid
     order by updated_at desc
@@ -456,7 +477,7 @@ async function buildUserPrompt(
     "Agent summary:",
     summary[0]?.summary ?? "(none)",
     "Current plan:",
-    plan[0] ? JSON.stringify(plan[0].body) : "(none)",
+    plan[0] ? `${plan[0].status}: ${JSON.stringify(plan[0].body)}` : "(none)",
     "Open conflict:",
     conflict[0] ? JSON.stringify(conflict[0].options) : "(none)",
     "Recent channel messages:",
@@ -592,6 +613,54 @@ async function recordTurn(
       where id = ${context.projectId}::uuid
     `;
     let message: { id: string; body: string; created_at: Date } | undefined;
+    let planEvent:
+      | { id: string; body: { summary: string; steps: string[] } }
+      | undefined;
+    if (turn.status === "plan" && turn.plan) {
+      await tx`
+        update plans
+        set status = 'draft', updated_at = now()
+        where agent_id = ${context.agentId}::uuid
+          and status = 'awaiting'
+      `;
+      const plans = await tx<{ id: string }[]>`
+        insert into plans (agent_id, status, body)
+        values (
+          ${context.agentId}::uuid,
+          'awaiting',
+          ${tx.json(turn.plan)}
+        )
+        returning id
+      `;
+      const planId = plans[0]?.id;
+      if (!planId) {
+        throw new Error("plan insert failed");
+      }
+      planEvent = { id: planId, body: turn.plan };
+      const messages = await tx<
+        { id: string; body: string; created_at: Date }[]
+      >`
+        insert into messages (channel_id, author_kind, body, run_id)
+        values (
+          ${context.channelId}::uuid,
+          'agent',
+          ${turn.plan.summary},
+          ${runId}::uuid
+        )
+        returning id, body, created_at
+      `;
+      message = messages[0];
+      await tx`
+        update agent_runs
+        set status = 'succeeded', updated_at = now()
+        where id = ${runId}::uuid
+      `;
+      await tx`
+        update agents
+        set status = 'awaiting_approval', updated_at = now()
+        where id = ${context.agentId}::uuid
+      `;
+    }
     if (turn.status === "final" && turn.answer && turn.summary) {
       const messages = await tx<
         { id: string; body: string; created_at: Date }[]
@@ -639,7 +708,7 @@ async function recordTurn(
       from agent_runs
       where id = ${runId}::uuid
     `;
-    return { stepIndex, message, totals: totals[0] };
+    return { stepIndex, message, totals: totals[0], planEvent };
   });
 
   publish(context.channelId, "run.step", {
@@ -653,6 +722,14 @@ async function recordTurn(
     tokenOut: outcome.tokenOut,
     costEst: outcome.costEst,
   });
+  if (saved.planEvent) {
+    publish(context.channelId, "plan.updated", {
+      planId: saved.planEvent.id,
+      agentId: context.agentId,
+      status: "awaiting",
+      body: saved.planEvent.body,
+    });
+  }
   if (saved.message) {
     publishMessageCreated(context.channelId, {
       id: saved.message.id,
@@ -763,7 +840,7 @@ export async function executeRun(
         }
       }
       await recordTurn(deps, context, runId, iteration, turn, outcome);
-      if (turn.status === "final") {
+      if (turn.status === "final" || turn.status === "plan") {
         return;
       }
     }
@@ -771,6 +848,93 @@ export async function executeRun(
   } catch {
     console.error("agent run failed");
     await markFailed(deps.sql, context, runId, "provider_failed", iteration);
+  }
+}
+
+export async function startContinuation(
+  deps: ExecuteDeps,
+  agentId: string,
+): Promise<EnqueueResult> {
+  const channels = await deps.sql<{ id: string }[]>`
+    select id from channels where agent_id = ${agentId}::uuid
+  `;
+  const channelId = channels[0]?.id;
+  if (!channelId) {
+    throw new Error("channel missing");
+  }
+  const context = await loadContext(deps.sql, channelId);
+  if (!context) {
+    throw new Error("channel missing");
+  }
+  const active = await deps.sql<{ id: string }[]>`
+    select id
+    from agent_runs
+    where agent_id = ${context.agentId}::uuid
+      and kind = 'main'
+      and status in ('pending', 'running')
+    limit 1
+  `;
+  if (active[0]) {
+    return { kind: "skipped", run: { error: "agent_busy" } };
+  }
+  if (!context.skillPack) {
+    const id = await failNewRun(deps.sql, context, "missing_skill");
+    return { kind: "failed", run: { id, error: "missing_skill" } };
+  }
+  const blocked = spendBlock(
+    context.llmPaused,
+    context.spendCap,
+    context.spendUsed,
+  );
+  if (blocked) {
+    const id = await failNewRun(deps.sql, context, blocked);
+    return { kind: "failed", run: { id, error: blocked } };
+  }
+  const credentials = await listCandidates(
+    deps.sql,
+    context.projectId,
+    context.credentialId,
+    context.modelId,
+  );
+  if (credentials.active === 0) {
+    const id = await failNewRun(deps.sql, context, "missing_credential");
+    return { kind: "failed", run: { id, error: "missing_credential" } };
+  }
+  if (credentials.usable.length === 0) {
+    const id = await failNewRun(deps.sql, context, "provider_failed");
+    return { kind: "failed", run: { id, error: "provider_failed" } };
+  }
+  try {
+    const id = await deps.sql.begin(async (tx) => {
+      const rows = await tx<{ id: string }[]>`
+        insert into agent_runs (
+          project_id, channel_id, agent_id, kind, status
+        ) values (
+          ${context.projectId}::uuid,
+          ${context.channelId}::uuid,
+          ${context.agentId}::uuid,
+          'main',
+          'pending'
+        )
+        returning id
+      `;
+      const runId = rows[0]?.id;
+      if (!runId) {
+        throw new Error("run insert failed");
+      }
+      await tx`
+        update agents
+        set status = 'working', updated_at = now()
+        where id = ${context.agentId}::uuid
+      `;
+      return runId;
+    });
+    return { kind: "started", run: { id } };
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      return { kind: "skipped", run: { error: "agent_busy" } };
+    }
+    throw error;
   }
 }
 
