@@ -258,6 +258,19 @@ export function ChannelThread({
         void loadRun();
       });
     }
+    source.addEventListener("channel.created", () => {
+      void (async () => {
+        const response = await fetch(
+          `${API_ORIGIN}/projects/${projectId}/channels`,
+          { credentials: "include" },
+        );
+        if (!response.ok) {
+          return;
+        }
+        const body = (await response.json()) as { channels?: Channel[] };
+        setChannels(body.channels ?? []);
+      })();
+    });
     source.addEventListener("plan.updated", () => {
       void loadPlan();
     });
@@ -287,7 +300,7 @@ export function ChannelThread({
       cancelled = true;
       source.close();
     };
-  }, [channelId]);
+  }, [channelId, projectId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -569,29 +582,31 @@ export function ChannelThread({
             This project is at its spend cap.
           </p>
         ) : null}
-        {nextCursor ? (
-          <button
-            className="mt-3 text-sm font-medium text-stone-700 underline"
-            type="button"
-            onClick={() => void loadOlder()}
-          >
-            Load older
-          </button>
-        ) : null}
-        <ul className="mt-3 space-y-3">
-          {messages.length === 0 ? (
-            <li className="text-sm text-stone-500">No messages yet.</li>
-          ) : (
-            messages.map((message) => (
-              <li key={message.id}>
-                <p className="text-xs text-stone-500">{message.authorKind}</p>
-                <p className="whitespace-pre-wrap text-stone-900">
-                  {message.body}
-                </p>
-              </li>
-            ))
-          )}
-        </ul>
+        <div className="mt-3 max-h-[70vh] space-y-3 overflow-y-auto">
+          {nextCursor ? (
+            <button
+              className="text-sm font-medium text-stone-700 underline"
+              type="button"
+              onClick={() => void loadOlder()}
+            >
+              Load older
+            </button>
+          ) : null}
+          <ul className="space-y-3">
+            {messages.length === 0 ? (
+              <li className="text-sm text-stone-500">No messages yet.</li>
+            ) : (
+              messages.map((message) => (
+                <li key={message.id}>
+                  <p className="text-xs text-stone-500">{message.authorKind}</p>
+                  <p className="whitespace-pre-wrap text-stone-900">
+                    {message.body}
+                  </p>
+                </li>
+              ))
+            )}
+          </ul>
+        </div>
         {plan ? (
           <div className="mt-4 rounded-lg border border-stone-300 bg-stone-50 px-4 py-3">
             <h3 className="text-sm font-semibold">Plan · {plan.status}</h3>

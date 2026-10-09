@@ -1,6 +1,6 @@
 # Dawk
 
-Local Phase 1 app through M11. The web app is Next.js. The API is Hono on Bun. Postgres is the database. A busy Orchestrator queues work, answers a short question on the side, and waits for the Owner to resolve a conflict.
+Local Phase 1 app through M12. The web app is Next.js. The API is Hono on Bun. Postgres is the database. An Owner can add Frontend and Backend channels, and the chat stays usable on a phone.
 
 ## Prerequisites
 
@@ -131,6 +131,8 @@ http://127.0.0.1:3001/auth/google/callback
 
 Then start at http://127.0.0.1:3001/auth/google/start. A successful login lands on `/account`. Cancelling returns to `/login`. If the Google env names are empty, that start URL returns `google_not_configured` and password plus magic link still work.
 
+A friend test uses one public URL. Set `NEXT_PUBLIC_API_ORIGIN` to `/api` and `APP_URL` to the https tunnel origin with no trailing slash, then restart. Next forwards `/api` to the API on port 3001. The session cookie gains `Secure` only when `APP_URL` is https. Local `http://127.0.0.1:3000` stays unchanged when `NEXT_PUBLIC_API_ORIGIN` is blank. Google sign-in stays on the localhost callback above.
+
 ## Layout
 
 - `apps/web` — Next.js, Tailwind, TypeScript on `127.0.0.1:3000`
@@ -143,4 +145,4 @@ Do not commit `.env`, API keys, passwords, or session tokens. `SESSION_SECRET` a
 
 ## Scope right now
 
-Local only. A busy Orchestrator keeps work in order, and only the Owner settles a conflict. Spend pause and cap show on the channel. UI polish comes in a later milestone. Hosting vendors stay undecided until M13.
+Local only. The Owner can add Frontend and Backend channels. Chat stays usable on a phone. A friend tunnel can wait until the keys are in `.env`. Hosting vendors stay undecided until M13.

@@ -326,6 +326,25 @@ Durations: **not estimated** (team = 2, no deadline). Need velocity samples afte
 | **Prereq** | M11, M10 |
 | **DoD** | Checklist signed for local path SC-010 |
 
+#### Local SC matrix (T-014)
+
+Local evidence only. The free-host and cloud rows of SC-010 stay "not run" until M13. SC-009 stays unsigned until the people in a friend session say they could follow the work.
+
+| ID | Local evidence | Status |
+| --- | --- | --- |
+| SC-001 | Two people in one channel. Manual tunnel session. | Pending tunnel session |
+| SC-002 | Orchestrator plan or Brief visible to a Member. Decision test, plus the tunnel session. | Tested; tunnel spot-check pending |
+| SC-003 | Owner adds Frontend and Backend. `spawn.test.ts`, then seen in the tunnel. | Tested; tunnel spot-check pending |
+| SC-004 | Owner approves a plan. Member approve is 403. `worker.test.ts`. | Tested |
+| SC-005 | Busy work is queued. A question is a short side run. `worker.test.ts`. | Tested |
+| SC-006 | Only the Owner resolves a conflict. `worker.test.ts`. | Tested |
+| SC-007 | The call uses the Owner key. `worker.test.ts`. Live key spot-check waits for the tunnel session. | Tested with a fake client |
+| SC-008 | Phone-width chat: scrolling transcript, composer stays on screen. | Checked at 390×844: message box and Send sit inside the viewport |
+| SC-009 | Friends follow one planning session. | Unsigned |
+| SC-010 | Local path is this checklist. Free-host and cloud paths are not run. | Local row signed |
+| SC-011 | A new API process still reads saved messages. `channels.test.ts`. A later idle uses the same Postgres rows. | Tested |
+| SC-012 | Pause and cap stop new calls. The channel shows the reason. `worker.test.ts`. | Tested |
+
 ### M13 — Free-tier deploy
 
 | | |
@@ -687,3 +706,4 @@ High-level tasks for critical path (expand when coding ban lifts):
 | 2026-10-09 | T-011 done: pending decisions are not facts. Owner accept pins the Brief and posts channel notices. Member support is not accept. M10 not started. | M9 DoD: Pending is not fact; Owner accept pins and notices | T-011, M9, UF-008, ADR-023, SEC-CHECK C3 |
 | 2026-10-10 | T-012 done: an email invite joins a new user as a Member. MAIL-1 free plan is 3,000 emails per month and 100 per UTC day, with 3 verified domains. Live Resend send unverified; console mailer covers local. M11 not started. | M10 DoD: email invite joins a new user as a Member | T-012, M10, UF-003, UF-004, FR-026, ADR-016, ADR-018, MAIL-1, SEC-CHECK B3, E2, E3 |
 | 2026-10-10 | T-013 done: a busy Orchestrator queues work and answers a question on the side. Only the Owner resolves a conflict. Pause and cap show on the channel, and resume drains one queued item. M12 not started. | M11 DoD: queue, conflict, and spend controls are demoable | T-013, M11, UF-009, UF-010, UF-012, SC-005, SC-006, SC-012, SEC-CHECK C2, D5 |
+| 2026-10-10 | T-014 done: the Owner can add Frontend and Backend channels, and the chat composer stays on screen at phone width. Local SC-010 row is this checklist. SC-009 stays unsigned until a friend session. M13 not started. | M12 DoD: local SC checklist, including the local row of SC-010 | T-014, M12, UF-006, FR-035, SC-003, SC-008, SC-010, SEC-CHECK F3 |

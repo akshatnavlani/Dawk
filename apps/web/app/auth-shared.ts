@@ -1,4 +1,8 @@
-export const API_ORIGIN = "http://127.0.0.1:3001";
+export const API_ORIGIN =
+  process.env.NEXT_PUBLIC_API_ORIGIN &&
+  process.env.NEXT_PUBLIC_API_ORIGIN.trim().length > 0
+    ? process.env.NEXT_PUBLIC_API_ORIGIN.replace(/\/$/, "")
+    : "http://127.0.0.1:3001";
 
 const messages: Record<string, string> = {
   invalid_credentials: "That email and password did not match.",
@@ -36,7 +40,7 @@ const messages: Record<string, string> = {
   queue_full: "The queue is full. Try again later.",
   intent_required: "Say whether this is work to queue or a question.",
   qa_busy: "A question is already being answered.",
-  conflict_open: "An open conflict has to be resolved first.",
+  specialist_exists: "That specialist channel already exists.",
 };
 
 export function messageFor(code: string | null): string | null {

@@ -71,12 +71,14 @@ function clientIp(c: Context): string {
   return forwarded.split(",")[0]?.trim() || "local";
 }
 
-function sessionCookie(value: string): string {
-  return `${SESSION_COOKIE}=${value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_SECONDS}`;
+function sessionCookie(value: string, secure: boolean): string {
+  const secureFlag = secure ? "; Secure" : "";
+  return `${SESSION_COOKIE}=${value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_SECONDS}${secureFlag}`;
 }
 
-function clearSessionCookie(): string {
-  return `${SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`;
+function clearSessionCookie(secure: boolean): string {
+  const secureFlag = secure ? "; Secure" : "";
+  return `${SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${secureFlag}`;
 }
 
 function readCookie(c: Context): string | null {
@@ -110,6 +112,7 @@ async function issueSession(
   sql: Sql,
   sessionSecret: string,
   userId: string,
+  secure: boolean,
 ): Promise<void> {
   const sealed = sealSession(sessionSecret);
   await sql`
@@ -120,7 +123,7 @@ async function issueSession(
       now() + interval '14 days'
     )
   `;
-  c.header("Set-Cookie", sessionCookie(sealed.cookieValue));
+  c.header("Set-Cookie", sessionCookie(sealed.cookieValue, secure));
 }
 
 export async function currentUser(
@@ -228,7 +231,13 @@ export function createAuthRoutes(deps: AuthDeps): Hono {
     if (!user) {
       return jsonError(c, 409, "email_taken");
     }
-    await issueSession(c, deps.sql, deps.sessionSecret, user.id);
+    await issueSession(
+      c,
+      deps.sql,
+      deps.sessionSecret,
+      user.id,
+      deps.appUrl.startsWith("https://"),
+    );
     return c.json({ email: parsed.data.email }, 201);
   });
 
@@ -251,7 +260,13 @@ export function createAuthRoutes(deps: AuthDeps): Hono {
     if (!user || !matches) {
       return jsonError(c, 401, "invalid_credentials");
     }
-    await issueSession(c, deps.sql, deps.sessionSecret, user.id);
+    await issueSession(
+      c,
+      deps.sql,
+      deps.sessionSecret,
+      user.id,
+      deps.appUrl.startsWith("https://"),
+    );
     return c.json({ email: parsed.data.email }, 200);
   });
 
@@ -330,7 +345,13 @@ export function createAuthRoutes(deps: AuthDeps): Hono {
     if (!userId) {
       return c.redirect(`${deps.appUrl}/login?error=magic_invalid`);
     }
-    await issueSession(c, deps.sql, deps.sessionSecret, userId);
+    await issueSession(
+      c,
+      deps.sql,
+      deps.sessionSecret,
+      userId,
+      deps.appUrl.startsWith("https://"),
+    );
     return c.redirect(`${deps.appUrl}/account`);
   });
 
@@ -437,7 +458,13 @@ export function createAuthRoutes(deps: AuthDeps): Hono {
       }
     }
 
-    await issueSession(c, deps.sql, deps.sessionSecret, userId);
+    await issueSession(
+      c,
+      deps.sql,
+      deps.sessionSecret,
+      userId,
+      deps.appUrl.startsWith("https://"),
+    );
     return c.redirect(`${deps.appUrl}/account`);
   });
 
@@ -457,7 +484,10 @@ export function createAuthRoutes(deps: AuthDeps): Hono {
         await deps.sql`delete from sessions where token_hash = ${tokenHash}`;
       }
     }
-    c.header("Set-Cookie", clearSessionCookie());
+    c.header(
+      "Set-Cookie",
+      clearSessionCookie(deps.appUrl.startsWith("https://")),
+    );
     return c.json({ ok: true }, 200);
   });
 
