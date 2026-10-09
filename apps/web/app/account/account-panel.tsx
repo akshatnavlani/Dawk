@@ -100,6 +100,10 @@ export function AccountPanel() {
           Projects
         </a>
         {" · "}
+        <a className={linkClass} href="/invites">
+          Invites
+        </a>
+        {" · "}
         <a className={linkClass} href="/">
           Back to status
         </a>

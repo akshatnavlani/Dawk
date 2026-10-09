@@ -10,6 +10,7 @@ import {
 } from "../../auth-shared";
 import { ChannelThread } from "./channel-thread";
 import { CredentialsPanel } from "./credentials-panel";
+import { InvitesPanel } from "./invites-panel";
 
 type Project = {
   id: string;
@@ -92,6 +93,9 @@ export function ProjectPanel({ projectId }: { projectId: string }) {
             You are the {project.role}. Spend used {project.spendUsed}.
           </p>
           <ChannelThread projectId={project.id} role={project.role} />
+          {project.role === "owner" ? (
+            <InvitesPanel projectId={project.id} />
+          ) : null}
           {project.role === "owner" ? (
             <CredentialsPanel
               projectId={project.id}

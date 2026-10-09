@@ -1,6 +1,6 @@
 # Dawk
 
-Local Phase 1 app through M2. The web app is Next.js. The API is Hono on Bun. Postgres is the database. Sign-in works locally. Projects, invites, and agents are later milestones.
+Local Phase 1 app through M10. The web app is Next.js. The API is Hono on Bun. Postgres is the database. An Owner can invite an email address. A new account follows the link, signs up, and joins as a Member.
 
 ## Prerequisites
 
@@ -119,7 +119,7 @@ bun run db:migrate:down
 
 Open http://127.0.0.1:3000/signup or http://127.0.0.1:3000/login.
 
-Password signup and login talk to the API with an httpOnly cookie named `dawk_session`. A magic-link request always answers the same way. Until Resend is wired (M10), the API prints the one-time link in its console. Open that link in the browser. It expires in 15 minutes and works once.
+Password signup and login talk to the API with an httpOnly cookie named `dawk_session`. A magic-link request always answers the same way. When `RESEND_API_KEY` and `MAIL_FROM` are both set, magic links, change-email messages, and invites go through Resend. If either is blank, the API prints the message in its console. A live Resend send is unverified until a key is set. A custom domain must be verified before `MAIL_FROM` can use it. Until then, Resend only allows its onboarding from-address, and only to the account owner's own inbox. Open the link in the browser. A magic link expires in 15 minutes and works once. An invite expires in 7 days and works once.
 
 Change email from the account page. The address does not change until you open the confirmation link from the API console.
 
@@ -139,8 +139,8 @@ Then start at http://127.0.0.1:3001/auth/google/start. A successful login lands 
 
 ## Secrets
 
-Do not commit `.env`, API keys, passwords, or session tokens. `SESSION_SECRET` and `CREDENTIALS_ENCRYPTION_KEY` must differ. Credential encryption and Resend are later milestones. Leave those values blank until that work starts.
+Do not commit `.env`, API keys, passwords, or session tokens. `SESSION_SECRET` and `CREDENTIALS_ENCRYPTION_KEY` must differ. Leave `RESEND_API_KEY` and `MAIL_FROM` blank to keep mail in the API console.
 
 ## Scope right now
 
-Local only. A pending decision stays out of the Brief until the Owner accepts it. Invites come in a later milestone. Hosting vendors stay undecided until M13.
+Local only. An email invite joins a new user as a Member. Queue, Q&A, and conflicts come in a later milestone. Hosting vendors stay undecided until M13.

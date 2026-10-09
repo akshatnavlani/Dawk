@@ -3,7 +3,7 @@ import { cors } from "hono/cors";
 import type { Sql } from "postgres";
 import { z } from "zod";
 import { exchangeGoogleCode, type GoogleTokenClient } from "./auth/google";
-import { consoleMailer, type Mailer } from "./auth/mail";
+import { createMailer, type Mailer } from "./auth/mail";
 import { createRateLimiter, type RateLimiter } from "./auth/rate-limit";
 import { createAuthRoutes } from "./auth/routes";
 import { createChannelRoutes } from "./channels/routes";
@@ -11,6 +11,7 @@ import { createCredentialRoutes } from "./credentials/routes";
 import { ping } from "./db";
 import { createDecisionRoutes } from "./decisions/routes";
 import type { Env } from "./env";
+import { createInviteRoutes } from "./invites/routes";
 import { createProjectRoutes } from "./projects/routes";
 import { enqueueRun, executeRun, startContinuation } from "./worker/loop";
 import { createLiveClient, type LlmClient } from "./worker/provider";
@@ -55,17 +56,28 @@ export function createApp(deps: AppDeps): Hono {
     return c.json(body, dbUp ? 200 : 503);
   });
 
+  const mailer = deps.mailer ?? createMailer(deps.env);
   app.route(
     "/",
     createAuthRoutes({
       sql: deps.sql,
       sessionSecret: deps.env.SESSION_SECRET,
       appUrl: deps.env.APP_URL,
-      mailer: deps.mailer ?? consoleMailer,
+      mailer,
       rateLimiter: deps.rateLimiter ?? createRateLimiter(),
       googleClientId: deps.env.GOOGLE_CLIENT_ID,
       googleClientSecret: deps.env.GOOGLE_CLIENT_SECRET,
       googleTokenClient: deps.googleTokenClient ?? exchangeGoogleCode,
+    }),
+  );
+  app.route(
+    "/",
+    createInviteRoutes({
+      sql: deps.sql,
+      sessionSecret: deps.env.SESSION_SECRET,
+      appUrl: deps.env.APP_URL,
+      mailer,
+      rateLimiter: deps.rateLimiter ?? createRateLimiter(),
     }),
   );
   app.route(

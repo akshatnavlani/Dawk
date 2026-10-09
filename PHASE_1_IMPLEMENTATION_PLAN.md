@@ -513,7 +513,7 @@ Milestone DoD must include tests listed in Section D.
 | Spike | Question | Pass/fail | Affects |
 | --- | --- | --- | --- |
 | **HOST-1** | Which free hosts run Bun/Node Hono with usable SSE + managed Postgres under $0? | Documented choice with quota notes | M13, Section J |
-| **MAIL-1** | Current Resend free limits + domain requirements? | Limits recorded in SoT | M10 |
+| **MAIL-1** | Current Resend free limits + domain requirements? | Recorded 2026-10-10: free plan 3,000/month and 100/UTC day; each recipient counts; 3 domains. Live send unverified. | M10 |
 | **LLM-1** | Error signatures for quota/auth on 1–2 providers? | Mapping table | M7 fallbacks |
 | **SEC-1** | Envelope encryption approach for creds with only env secret? | Approach written | M6 |
 
@@ -685,3 +685,4 @@ High-level tasks for critical path (expand when coding ban lifts):
 | 2026-10-09 | T-009 done: Orchestrator replies from a packed loop with SSE steps. Defaults claude-sonnet-5-5 ($2/$10 per MTok) and gpt-6-astra ($10/$50 per MTok, short context). Spend pause and cap block calls. Live Anthropic call unverified. M8 not started. | M7 DoD: Orchestrator replies with SSE steps; spend pause respected | T-009, M7, UF-005, ADR-020, ADR-021, SEC-CHECK A3, D4, D5, G1, G3, G4 |
 | 2026-10-09 | T-010 done: Owner approve or reject of an awaiting plan. Member approve is 403. Approve resumes one continuation. M9 not started. | M8 DoD: Member cannot approve; Owner approve resumes | T-010, M8, UF-007, SC-004, SEC-CHECK C2 |
 | 2026-10-09 | T-011 done: pending decisions are not facts. Owner accept pins the Brief and posts channel notices. Member support is not accept. M10 not started. | M9 DoD: Pending is not fact; Owner accept pins and notices | T-011, M9, UF-008, ADR-023, SEC-CHECK C3 |
+| 2026-10-10 | T-012 done: an email invite joins a new user as a Member. MAIL-1 free plan is 3,000 emails per month and 100 per UTC day, with 3 verified domains. Live Resend send unverified; console mailer covers local. M11 not started. | M10 DoD: email invite joins a new user as a Member | T-012, M10, UF-003, UF-004, FR-026, ADR-016, ADR-018, MAIL-1, SEC-CHECK B3, E2, E3 |

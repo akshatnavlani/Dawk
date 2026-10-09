@@ -7,6 +7,7 @@ import {
   fieldClass,
   linkClass,
   messageFor,
+  nextPath,
 } from "../auth-shared";
 
 export function LoginForm() {
@@ -36,7 +37,7 @@ export function LoginForm() {
     });
     setSignInPending(false);
     if (response.ok) {
-      window.location.assign("/account");
+      window.location.assign(nextPath());
       return;
     }
     const body = (await response.json()) as { error?: string };

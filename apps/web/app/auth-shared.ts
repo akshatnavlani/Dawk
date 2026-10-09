@@ -25,6 +25,13 @@ const messages: Record<string, string> = {
   credential_in_use: "That key is still used by a past run.",
   plan_superseded: "That plan is no longer the one waiting for approval.",
   decision_not_pending: "That decision is no longer pending.",
+  already_member: "That person is already in the project.",
+  invite_invalid: "That invite is not valid.",
+  invite_revoked: "That invite was revoked.",
+  invite_expired: "That invite expired. Ask for a new one.",
+  invite_declined: "That invite was declined.",
+  invite_email_mismatch: "Sign in with the invited email address.",
+  mail_failed: "The invite email could not be sent. Try again.",
 };
 
 export function messageFor(code: string | null): string | null {
@@ -32,6 +39,14 @@ export function messageFor(code: string | null): string | null {
     return null;
   }
   return messages[code] ?? "Something went wrong. Try again.";
+}
+
+export function nextPath(): string {
+  const next = new URLSearchParams(window.location.search).get("next");
+  if (next?.startsWith("/invites/accept")) {
+    return next;
+  }
+  return "/account";
 }
 
 export const fieldClass =

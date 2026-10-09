@@ -22,6 +22,8 @@ const envSchema = z.object({
   GOOGLE_CLIENT_ID: z.string().min(1).optional(),
   GOOGLE_CLIENT_SECRET: z.string().min(1).optional(),
   CREDENTIALS_ENCRYPTION_KEY: z.string().min(32),
+  RESEND_API_KEY: z.string().min(1).optional(),
+  MAIL_FROM: z.string().min(1).optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -51,6 +53,8 @@ export function loadEnv(): Env {
     CREDENTIALS_ENCRYPTION_KEY: blankToUndefined(
       process.env.CREDENTIALS_ENCRYPTION_KEY,
     ),
+    RESEND_API_KEY: blankToUndefined(process.env.RESEND_API_KEY),
+    MAIL_FROM: blankToUndefined(process.env.MAIL_FROM),
   });
 
   if (!parsed.success) {
