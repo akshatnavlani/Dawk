@@ -392,7 +392,7 @@ describe("invites", () => {
       body: JSON.stringify({ email: emailAddress("guest") }),
     });
     failMail = false;
-    expect(response.status).toBe(502);
+    expect(response.status).toBe(422);
     const body = (await response.json()) as { error: string };
     expect(body.error).toBe("mail_failed");
     expect(JSON.stringify(body).includes("token")).toBe(false);

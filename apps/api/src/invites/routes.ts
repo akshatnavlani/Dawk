@@ -3,7 +3,7 @@ import { Hono } from "hono";
 import type { Sql } from "postgres";
 import { z } from "zod";
 import { newToken, sha256 } from "../auth/crypto";
-import type { Mailer } from "../auth/mail";
+import { mailErrorCode, type Mailer } from "../auth/mail";
 import type { RateLimiter } from "../auth/rate-limit";
 import { currentUser, type SessionUser } from "../auth/routes";
 
@@ -45,7 +45,7 @@ type InviteRow = {
 
 function jsonError(
   c: Context,
-  status: 400 | 401 | 403 | 404 | 409 | 429 | 502,
+  status: 400 | 401 | 403 | 404 | 409 | 422 | 429,
   error: string,
 ) {
   return c.json({ error }, status);
@@ -298,8 +298,8 @@ export function createInviteRoutes(deps: {
         projectName,
         token,
       });
-    } catch {
-      return jsonError(c, 502, "mail_failed");
+    } catch (error) {
+      return jsonError(c, 422, mailErrorCode(error));
     }
     return c.json(toInvite(invite), pending[0] ? 200 : 201);
   });

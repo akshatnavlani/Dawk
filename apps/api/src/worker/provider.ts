@@ -4,16 +4,21 @@ import OpenAI from "openai";
 export const DEFAULT_MODELS = {
   anthropic: "claude-sonnet-5-5",
   openai: "gpt-6-astra",
+  google: "gemini-3.8-flash",
 } as const;
 
 const SUPPORTED = new Set<string>(Object.keys(DEFAULT_MODELS));
 
-// Published base rates in USD per million tokens on 2026-10-09.
-// Cache and long-context prices are not included. Unknown models use the
-// higher of these two so a spend cap does not under-count.
+// Published base rates in USD per million tokens.
+// Anthropic and OpenAI rates checked 2026-10-09. Gemini 3.8 Flash standard
+// rate checked 2026-10-10: $0.75 input and $3.75 output through 2026-12-31
+// (https://ai.google.dev/gemini-api/docs/pricing). Cache and long-context
+// prices are not included. Unknown models use the higher of the Claude and
+// OpenAI rates so a spend cap does not under-count.
 const RATES: Record<string, { input: number; output: number }> = {
   "claude-sonnet-5-5": { input: 2, output: 10 },
   "gpt-6-astra": { input: 10, output: 50 },
+  "gemini-3.8-flash": { input: 0.75, output: 3.75 },
 };
 const FALLBACK_RATE = { input: 10, output: 50 };
 
@@ -59,7 +64,11 @@ export function supportsProvider(provider: string): boolean {
 }
 
 export function defaultModel(provider: string): string | null {
-  if (provider === "anthropic" || provider === "openai") {
+  if (
+    provider === "anthropic" ||
+    provider === "openai" ||
+    provider === "google"
+  ) {
     return DEFAULT_MODELS[provider];
   }
   return null;
@@ -137,6 +146,9 @@ export function createLiveClient(): LlmClient {
         if (request.provider === "anthropic") {
           return await completeAnthropic(request);
         }
+        if (request.provider === "google") {
+          return await completeGoogle(request);
+        }
         return await completeOpenAI(request);
       } catch (error) {
         throw asLlmError(error);
@@ -162,6 +174,49 @@ async function completeAnthropic(request: LlmRequest): Promise<LlmResult> {
     .join("");
   const tokenIn = message.usage.input_tokens;
   const tokenOut = message.usage.output_tokens;
+  return {
+    text,
+    tokenIn,
+    tokenOut,
+    costEst: estimateCost(request.model, tokenIn, tokenOut),
+  };
+}
+
+async function completeGoogle(request: LlmRequest): Promise<LlmResult> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(request.model)}:generateContent`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-goog-api-key": request.apiKey,
+    },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: request.system }] },
+      contents: [{ role: "user", parts: [{ text: request.user }] }],
+    }),
+    signal: AbortSignal.timeout(45_000),
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    console.error(`gemini failed status=${response.status}`);
+    throw new LlmError(classifyProviderFailure(response.status, detail));
+  }
+  const body = (await response.json()) as {
+    candidates?: {
+      content?: { parts?: { text?: string; thought?: boolean }[] };
+    }[];
+    usageMetadata?: {
+      promptTokenCount?: number;
+      candidatesTokenCount?: number;
+    };
+  };
+  const parts = body.candidates?.[0]?.content?.parts ?? [];
+  const text = parts
+    .filter((part) => part.thought !== true && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("");
+  const tokenIn = body.usageMetadata?.promptTokenCount ?? 0;
+  const tokenOut = body.usageMetadata?.candidatesTokenCount ?? 0;
   return {
     text,
     tokenIn,

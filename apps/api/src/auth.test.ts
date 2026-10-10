@@ -31,6 +31,7 @@ function testEnv(overrides?: Partial<Env>): Env {
     ...loadEnv(),
     GOOGLE_CLIENT_ID: "test-google-client",
     GOOGLE_CLIENT_SECRET: "test-google-secret",
+    NEXT_PUBLIC_API_ORIGIN: "https://api.test.example",
     ...overrides,
   };
 }
@@ -156,7 +157,13 @@ describe("auth", () => {
     const requested = await postJson(app, "/auth/magic-link", { email });
     expect(requested.status).toBe(202);
     const link = sent.at(-1)?.text ?? "";
-    const token = new URL(link.split("\n")[1] ?? "").searchParams.get("token");
+    const magicUrl = link.split("\n")[1] ?? "";
+    expect(
+      magicUrl.startsWith(
+        "https://api.test.example/auth/magic-link/consume?token=",
+      ),
+    ).toBe(true);
+    const token = new URL(magicUrl).searchParams.get("token");
     expect(token).toBeTruthy();
 
     const consumed = await app.request(
@@ -194,6 +201,27 @@ describe("auth", () => {
       `/auth/magic-link/consume?token=${encodeURIComponent(expiredToken ?? "")}`,
     );
     expect(expired.headers.get("location")).toContain("magic_expired");
+  });
+
+  test("a rejected magic link is a json error", async () => {
+    const failing = createApp({
+      env: testEnv(),
+      sql,
+      mailer: {
+        async send() {
+          throw new Error("mail_unverified_sender");
+        },
+      },
+      rateLimiter: createRateLimiter({ limit: 100, windowMs: 60_000 }),
+      googleTokenClient: async () => {
+        throw new Error("google stub not set");
+      },
+    });
+    const response = await postJson(failing, "/auth/magic-link", {
+      email: emailAddress(),
+    });
+    expect(response.status).toBe(422);
+    expect(await response.json()).toEqual({ error: "mail_unverified_sender" });
   });
 
   test("change email waits for verification and rejects reuse", async () => {

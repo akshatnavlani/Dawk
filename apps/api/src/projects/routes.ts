@@ -3,7 +3,7 @@ import { Hono } from "hono";
 import type { Sql } from "postgres";
 import { z } from "zod";
 import { currentUser, type SessionUser } from "../auth/routes";
-import { publish } from "../channels/hub";
+import { publishSpecialistCreated, spawnSpecialist } from "./spawn";
 
 const nameSchema = z.string().trim().min(1).max(200);
 const spendCapSchema = z.number().nonnegative().nullable();
@@ -17,11 +17,6 @@ const spawnSchema = z.object({
   kind: z.enum(["frontend", "backend"]),
   brief: z.string().trim().max(2000).optional(),
 });
-
-const specialistName = {
-  frontend: "Frontend",
-  backend: "Backend",
-} as const;
 
 const patchProjectSchema = z
   .object({
@@ -430,73 +425,23 @@ export function createProjectRoutes(deps: {
     if (!parsed.success) {
       return jsonError(c, 400, "invalid_request");
     }
-    const existing = await deps.sql<{ id: string }[]>`
-      select agents.id
-      from agents
-      join skills on skills.id = agents.skill_id
-      where agents.project_id = ${projectId.data}::uuid
-        and skills.slug = ${parsed.data.kind}
-    `;
-    if (existing[0]) {
+    const created = await deps.sql.begin((tx) =>
+      spawnSpecialist(tx, {
+        projectId: projectId.data,
+        kind: parsed.data.kind,
+        brief: parsed.data.brief,
+      }),
+    );
+    if (!created) {
       return jsonError(c, 409, "specialist_exists");
     }
-    const name = specialistName[parsed.data.kind];
-    const brief =
-      parsed.data.brief && parsed.data.brief.length > 0
-        ? parsed.data.brief
-        : `Requirements for the ${parsed.data.kind} specialist.`;
-    const created = await deps.sql.begin(async (tx) => {
-      const agents = await tx<{ id: string }[]>`
-        insert into agents (project_id, kind, name, status, skill_id)
-        select
-          ${projectId.data}::uuid,
-          'specialist',
-          ${name},
-          'idle',
-          skills.id
-        from skills
-        where skills.slug = ${parsed.data.kind}
-          and skills.version = 1
-        returning id
-      `;
-      const agent = agents[0];
-      if (!agent) {
-        throw new Error("specialist insert failed");
-      }
-      const channels = await tx<{ id: string }[]>`
-        insert into channels (project_id, agent_id)
-        values (${projectId.data}::uuid, ${agent.id}::uuid)
-        returning id
-      `;
-      const channel = channels[0];
-      if (!channel) {
-        throw new Error("channel insert failed");
-      }
-      await tx`
-        insert into messages (channel_id, author_kind, body)
-        values (${channel.id}::uuid, 'system', ${brief})
-      `;
-      return { agentId: agent.id, channelId: channel.id };
-    });
-    const listeners = await deps.sql<{ id: string }[]>`
-      select id from channels
-      where project_id = ${projectId.data}::uuid
-        and id <> ${created.channelId}::uuid
-    `;
-    for (const listener of listeners) {
-      publish(listener.id, "channel.created", {
-        channelId: created.channelId,
-        agentId: created.agentId,
-        name,
-        kind: parsed.data.kind,
-      });
-    }
+    await publishSpecialistCreated(deps.sql, projectId.data, created);
     return c.json(
       {
         agentId: created.agentId,
         channelId: created.channelId,
-        name,
-        kind: parsed.data.kind,
+        name: created.name,
+        kind: created.kind,
       },
       201,
     );

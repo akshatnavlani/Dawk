@@ -69,6 +69,7 @@ export function createApp(deps: AppDeps): Hono {
       sql: deps.sql,
       sessionSecret: deps.env.SESSION_SECRET,
       appUrl: deps.env.APP_URL,
+      apiOrigin: deps.env.NEXT_PUBLIC_API_ORIGIN ?? "http://127.0.0.1:3001",
       mailer,
       rateLimiter: deps.rateLimiter ?? createRateLimiter(),
       googleClientId: deps.env.GOOGLE_CLIENT_ID,

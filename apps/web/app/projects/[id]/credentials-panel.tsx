@@ -205,7 +205,7 @@ export function CredentialsPanel({
           <input
             className={fieldClass}
             name="provider"
-            placeholder="anthropic"
+            placeholder="anthropic, openai, or google"
             required
           />
         </label>

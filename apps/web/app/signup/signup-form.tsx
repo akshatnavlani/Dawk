@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   API_ORIGIN,
   buttonClass,
@@ -13,6 +13,14 @@ import {
 export function SignupForm() {
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [signInHref, setSignInHref] = useState("/login");
+
+  useEffect(() => {
+    const next = new URLSearchParams(window.location.search).get("next");
+    if (next?.startsWith("/invites/accept")) {
+      setSignInHref(`/login?next=${encodeURIComponent(next)}`);
+    }
+  }, []);
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -71,7 +79,7 @@ export function SignupForm() {
       </form>
       <p className="mt-6 text-sm text-stone-500">
         Already have an account?{" "}
-        <a className={linkClass} href="/login">
+        <a className={linkClass} href={signInHref}>
           Sign in
         </a>
       </p>

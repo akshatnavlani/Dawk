@@ -1,7 +1,14 @@
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 import { z } from "zod";
 import { publish, publishMessageCreated } from "../channels/hub";
 import { decryptSecret } from "../credentials/crypto";
+import {
+  publishSpecialistCreated,
+  type SpawnedSpecialist,
+  type SpecialistKind,
+  spawnSpecialist,
+  specialistName,
+} from "../projects/spawn";
 import {
   defaultModel,
   type LlmClient,
@@ -16,6 +23,8 @@ const MESSAGE_WINDOW = 20;
 const QA_MESSAGE_WINDOW = 5;
 const QUEUE_LIMIT = 20;
 const runRequests = new Map<string, string>();
+const runActors = new Map<string, string>();
+const ownerOnlySpawn = "Only the Owner can add them.";
 const changeRequest =
   /^(please\s+)?(add|change|update|remove|delete|fix|build|implement|make)\b/i;
 
@@ -37,13 +46,25 @@ const conflictBodySchema = z.object({
 
 const turnSchema = z
   .object({
-    status: z.enum(["working", "final", "plan", "decision", "conflict"]),
+    status: z.enum([
+      "working",
+      "final",
+      "plan",
+      "decision",
+      "conflict",
+      "spawn",
+    ]),
     notes: z.string().trim().min(1).max(4000),
     answer: z.string().trim().min(1).max(8000).optional(),
     summary: z.string().trim().min(1).max(2000).optional(),
     plan: planBodySchema.optional(),
     proposal: z.string().trim().min(1).max(2000).optional(),
     conflict: conflictBodySchema.optional(),
+    agents: z
+      .array(z.enum(["frontend", "backend"]))
+      .min(1)
+      .max(2)
+      .optional(),
   })
   .superRefine((value, ctx) => {
     if (value.status === "final") {
@@ -73,6 +94,16 @@ const turnSchema = z
         code: "custom",
         path: ["conflict"],
         message: "conflict",
+      });
+    }
+    if (
+      value.status === "spawn" &&
+      (!value.agents || new Set(value.agents).size !== value.agents.length)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["agents"],
+        message: "agents",
       });
     }
   });
@@ -119,6 +150,7 @@ type ChannelContext = {
   channelId: string;
   projectId: string;
   agentId: string;
+  agentKind: string;
   skillPack: string | null;
   credentialId: string | null;
   modelId: string | null;
@@ -153,20 +185,30 @@ function parseTurn(text: string): Turn | null {
   }
 }
 
-function systemPrompt(skill: string): string {
+function systemPrompt(skill: string, agentKind: string): string {
+  const orchestrator = agentKind === "orchestrator";
   return [
     skill,
     "",
     "Reply with one JSON object and no markdown.",
-    'Keys: status ("working", "final", "plan", "decision", or "conflict"), notes (string).',
+    orchestrator
+      ? 'Keys: status ("working", "final", "plan", "decision", "conflict", or "spawn"), notes (string).'
+      : 'Keys: status ("working", "final", "plan", "decision", or "conflict"), notes (string).',
     "When status is final, also include answer and summary.",
     "When status is plan, also include plan with summary and steps.",
     "When status is decision, also include proposal.",
     "When status is conflict, also include conflict with at least two options, each with a label.",
+    ...(orchestrator
+      ? [
+          'When status is spawn, also include agents naming "frontend", "backend", or both.',
+        ]
+      : []),
     "A plan is not approved until the owner says so.",
     "A pending decision is not a fact until the owner accepts it.",
     "A conflict waits until the owner chooses.",
-    "status working is a progress note. status final is the channel reply.",
+    orchestrator
+      ? "status working is a progress note. status final is the channel reply. status spawn adds a specialist and ends the run. If the owner also asked a question, answer it in notes."
+      : "status working is a progress note. status final is the channel reply.",
   ].join("\n");
 }
 
@@ -235,6 +277,7 @@ async function loadContext(
       channel_id: string;
       project_id: string;
       agent_id: string;
+      agent_kind: string;
       skill_pack: string | null;
       credential_id: string | null;
       model_id: string | null;
@@ -248,6 +291,7 @@ async function loadContext(
       channels.id as channel_id,
       channels.project_id,
       agents.id as agent_id,
+      agents.kind as agent_kind,
       skills.system_prompt_pack as skill_pack,
       agents.credential_id,
       agents.model_id,
@@ -269,6 +313,7 @@ async function loadContext(
     channelId: row.channel_id,
     projectId: row.project_id,
     agentId: row.agent_id,
+    agentKind: row.agent_kind,
     skillPack: row.skill_pack,
     credentialId: row.credential_id,
     modelId: row.model_id,
@@ -575,6 +620,8 @@ export async function enqueueRun(
     }
     try {
       const id = await insertRun(deps.sql, context, "main");
+      runRequests.set(id, input.body);
+      runActors.set(id, input.userId);
       return { kind: "started", run: { id } };
     } catch (error) {
       if (isUniqueViolation(error)) {
@@ -597,6 +644,7 @@ export async function enqueueRun(
     try {
       const id = await insertRun(deps.sql, context, "qa");
       runRequests.set(id, input.body);
+      runActors.set(id, input.userId);
       return { kind: "started", run: { id } };
     } catch (error) {
       if (isUniqueViolation(error)) {
@@ -812,7 +860,7 @@ async function callModel(
       provider: credential.provider,
       apiKey,
       model: credential.model,
-      system: systemPrompt(context.skillPack ?? ""),
+      system: systemPrompt(context.skillPack ?? "", context.agentKind),
       user,
     };
     try {
@@ -853,6 +901,46 @@ async function callModel(
         }
       }
     }
+  }
+  return null;
+}
+
+function spawnConfirmation(
+  notes: string,
+  created: SpecialistKind[],
+  already: SpecialistKind[],
+): string {
+  if (already.length === 0) {
+    return notes;
+  }
+  const names = already.map((kind) => specialistName[kind]).join(" and ");
+  const line =
+    already.length === 1
+      ? `${names} is already there.`
+      : `${names} are already there.`;
+  if (created.length === 0) {
+    return line;
+  }
+  return `${notes} ${line}`;
+}
+
+async function triggeringRole(
+  sql: TransactionSql,
+  projectId: string,
+  runId: string,
+): Promise<"owner" | "member" | null> {
+  const userId = runActors.get(runId);
+  if (!userId) {
+    return null;
+  }
+  const rows = await sql<{ role: string }[]>`
+    select role from memberships
+    where project_id = ${projectId}::uuid
+      and user_id = ${userId}::uuid
+  `;
+  const role = rows[0]?.role;
+  if (role === "owner" || role === "member") {
+    return role;
   }
   return null;
 }
@@ -913,6 +1001,7 @@ async function recordTurn(
     let conflictEvent:
       | { id: string; options: Record<string, unknown>[] }
       | undefined;
+    let spawned: SpawnedSpecialist[] = [];
     if (turn.status === "decision" && turn.proposal) {
       const decisions = await tx<{ id: string }[]>`
         insert into decisions (
@@ -1110,6 +1199,55 @@ async function recordTurn(
         where id = ${runId}::uuid
       `;
     }
+    if (
+      turn.status === "spawn" &&
+      turn.agents &&
+      runKind === "main" &&
+      context.agentKind === "orchestrator"
+    ) {
+      const role = await triggeringRole(tx, context.projectId, runId);
+      const requested = [...new Set(turn.agents)];
+      let body = ownerOnlySpawn;
+      if (role === "owner") {
+        const created: SpecialistKind[] = [];
+        const already: SpecialistKind[] = [];
+        const made: SpawnedSpecialist[] = [];
+        const request = runRequests.get(runId);
+        for (const kind of requested) {
+          const result = await spawnSpecialist(tx, {
+            projectId: context.projectId,
+            kind,
+            brief: request,
+          });
+          if (result) {
+            created.push(kind);
+            made.push(result);
+          } else {
+            already.push(kind);
+          }
+        }
+        spawned = made;
+        body = spawnConfirmation(turn.notes, created, already);
+      }
+      const messages = await tx<
+        { id: string; body: string; created_at: Date }[]
+      >`
+        insert into messages (channel_id, author_kind, body, run_id)
+        values (
+          ${context.channelId}::uuid,
+          'agent',
+          ${body},
+          ${runId}::uuid
+        )
+        returning id, body, created_at
+      `;
+      message = messages[0];
+      await tx`
+        update agent_runs
+        set status = 'succeeded', updated_at = now()
+        where id = ${runId}::uuid
+      `;
+    }
     const totals = await tx<
       {
         token_in: number;
@@ -1129,13 +1267,19 @@ async function recordTurn(
       planEvent,
       decisionEvent,
       conflictEvent,
+      spawned,
     };
   });
+
+  for (const specialist of saved.spawned) {
+    await publishSpecialistCreated(deps.sql, context.projectId, specialist);
+  }
 
   if (
     turn.status === "final" ||
     turn.status === "decision" ||
-    turn.status === "conflict"
+    turn.status === "conflict" ||
+    turn.status === "spawn"
   ) {
     await releaseAgent(deps.sql, context, runId);
   }
@@ -1195,7 +1339,10 @@ async function recordTurn(
   }
 }
 
-function turnAllowed(kind: RunKind, turn: Turn): boolean {
+function turnAllowed(kind: RunKind, turn: Turn, agentKind: string): boolean {
+  if (turn.status === "spawn") {
+    return kind === "main" && agentKind === "orchestrator";
+  }
   if (kind === "main") {
     return true;
   }
@@ -1262,7 +1409,7 @@ export async function executeRun(
         return;
       }
       let turn = parseTurn(outcome.text);
-      if (turn && !turnAllowed(runKind, turn)) {
+      if (turn && !turnAllowed(runKind, turn, context.agentKind)) {
         turn = null;
       }
       if (!turn) {
@@ -1288,7 +1435,7 @@ export async function executeRun(
           return;
         }
         turn = parseTurn(outcome.text);
-        if (turn && !turnAllowed(runKind, turn)) {
+        if (turn && !turnAllowed(runKind, turn, context.agentKind)) {
           turn = null;
         }
         if (!turn) {
@@ -1307,7 +1454,8 @@ export async function executeRun(
         turn.status === "final" ||
         turn.status === "plan" ||
         turn.status === "decision" ||
-        turn.status === "conflict"
+        turn.status === "conflict" ||
+        turn.status === "spawn"
       ) {
         return;
       }
@@ -1319,6 +1467,7 @@ export async function executeRun(
       await markFailed(deps.sql, context, runId, "provider_failed", 1);
     }
   } finally {
+    runActors.delete(runId);
     if (drain && context) {
       const next = await drainQueue(deps, context.channelId);
       if (next) {
@@ -1417,8 +1566,13 @@ export async function drainQueue(
   if (credentials.usable.length === 0) {
     return null;
   }
-  const items = await deps.sql<{ id: string; body: string }[]>`
-    select instruction_queue_items.id, messages.body
+  const items = await deps.sql<
+    { id: string; body: string; author_user_id: string | null }[]
+  >`
+    select
+      instruction_queue_items.id,
+      messages.body,
+      messages.author_user_id
     from instruction_queue_items
     join messages on messages.id = instruction_queue_items.message_id
     where instruction_queue_items.channel_id = ${channelId}::uuid
@@ -1469,6 +1623,9 @@ export async function drainQueue(
       return null;
     }
     runRequests.set(id, item.body);
+    if (item.author_user_id) {
+      runActors.set(id, item.author_user_id);
+    }
     return id;
   } catch (error) {
     if (isUniqueViolation(error)) {

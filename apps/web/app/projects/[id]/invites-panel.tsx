@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import {
   API_ORIGIN,
   buttonClass,
+  errorCode,
   fieldClass,
   messageFor,
 } from "../../auth-shared";
@@ -56,19 +57,27 @@ export function InvitesPanel({ projectId }: { projectId: string }) {
     setError(null);
     const form = event.currentTarget;
     const data = new FormData(form);
-    const response = await fetch(
-      `${API_ORIGIN}/projects/${projectId}/invites`,
-      {
+    let response: Response;
+    try {
+      response = await fetch(`${API_ORIGIN}/projects/${projectId}/invites`, {
         method: "POST",
         credentials: "include",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ email: data.get("email") }),
-      },
-    );
+      });
+    } catch {
+      setPending(false);
+      setError(
+        "The invite could not be sent. Check your connection and try again.",
+      );
+      return;
+    }
     setPending(false);
-    const body = (await response.json()) as { error?: string };
     if (!response.ok) {
-      setError(messageFor(body.error ?? null));
+      setError(
+        messageFor(await errorCode(response)) ??
+          "The invite could not be sent. Try again.",
+      );
       return;
     }
     form.reset();

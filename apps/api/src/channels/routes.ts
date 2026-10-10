@@ -433,6 +433,8 @@ export function createChannelRoutes(deps: {
       return jsonError(c, 404, "not_found");
     }
 
+    c.header("Cache-Control", "no-cache, no-transform");
+    c.header("X-Accel-Buffering", "no");
     return streamSSE(c, async (stream) => {
       let open = true;
       const unsubscribe = subscribe(channelId.data, (event) => {
@@ -450,6 +452,9 @@ export function createChannelRoutes(deps: {
         unsubscribe();
       });
       while (open) {
+        await stream.writeSSE({ event: "ping", data: "1" }).catch(() => {
+          open = false;
+        });
         await stream.sleep(1000);
       }
     });

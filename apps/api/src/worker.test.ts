@@ -8,6 +8,9 @@ import { migrateUp } from "./migrate";
 import { executeRun } from "./worker/loop";
 import {
   classifyProviderFailure,
+  createLiveClient,
+  defaultModel,
+  estimateCost,
   type LlmClient,
   LlmError,
   type LlmRequest,
@@ -234,6 +237,66 @@ describe("worker", () => {
     expect(classifyProviderFailure(400, "insufficient quota")).toBe("quota");
     expect(classifyProviderFailure(503, "down")).toBe("transient");
     expect(classifyProviderFailure(400, "bad model")).toBe("fatal");
+  });
+
+  test("google uses gemini-3.8-flash and the published rate", () => {
+    expect(defaultModel("google")).toBe("gemini-3.8-flash");
+    expect(estimateCost("gemini-3.8-flash", 1_000_000, 1_000_000)).toBe(4.5);
+  });
+
+  test("a google key calls Gemini without putting the key in the URL", async () => {
+    const original = globalThis.fetch;
+    let url = "";
+    let header = "";
+    globalThis.fetch = (async (input, init) => {
+      url = String(input);
+      header = new Headers(init?.headers).get("x-goog-api-key") ?? "";
+      return new Response(
+        JSON.stringify({
+          candidates: [{ content: { parts: [{ text: "hello" }] } }],
+          usageMetadata: { promptTokenCount: 11, candidatesTokenCount: 7 },
+        }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+    try {
+      const result = await createLiveClient().complete({
+        provider: "google",
+        apiKey: "gemini-test-key",
+        model: "gemini-3.8-flash",
+        system: "skill",
+        user: "prompt",
+      });
+      expect(result.text).toBe("hello");
+      expect(result.tokenIn).toBe(11);
+      expect(result.tokenOut).toBe(7);
+      expect(result.costEst).toBe(estimateCost("gemini-3.8-flash", 11, 7));
+      expect(url.includes("gemini-test-key")).toBe(false);
+      expect(header).toBe("gemini-test-key");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("a gemini 401 is auth", async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response("no", { status: 401 })) as typeof fetch;
+    try {
+      await createLiveClient().complete({
+        provider: "google",
+        apiKey: "gemini-test-key",
+        model: "gemini-3.8-flash",
+        system: "skill",
+        user: "prompt",
+      });
+      throw new Error("gemini 401 should fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(LlmError);
+      expect((error as LlmError).kind).toBe("auth");
+    } finally {
+      globalThis.fetch = original;
+    }
   });
 
   test("a final reply is masked, packed, and stored", async () => {
@@ -1722,5 +1785,396 @@ describe("worker", () => {
       where channel_id = ${heldProject.orchestrator.channelId}::uuid
     `;
     expect(completed[0]?.status).toBe("completed");
+  });
+
+  test("an owner spawn creates both specialists once and a member cannot", async () => {
+    seen.length = 0;
+    const notes = "Frontend and Backend are ready.";
+    handler = () => ({
+      text: JSON.stringify({
+        status: "spawn",
+        notes,
+        agents: ["frontend", "backend"],
+      }),
+      tokenIn: 6,
+      tokenOut: 4,
+      costEst: 0.01,
+    });
+    const ownerCookie = await signup(app, emailAddress());
+    const memberEmail = emailAddress();
+    const memberCookie = await signup(app, memberEmail);
+    const project = await createProject(app, ownerCookie);
+    const member = await sql<{ id: string }[]>`
+      select id from users where email = ${memberEmail}
+    `;
+    const memberId = member[0]?.id;
+    if (!memberId) {
+      throw new Error("member missing");
+    }
+    await sql`
+      insert into memberships (project_id, user_id, role)
+      values (${project.id}::uuid, ${memberId}::uuid, 'member')
+    `;
+    await saveKey(app, ownerCookie, project.id, {
+      provider: "anthropic",
+      label: "Claude",
+      secret,
+      isPrimary: true,
+    });
+    const events: string[] = [];
+    const stop = subscribe(project.orchestrator.channelId, (event) => {
+      if (event.event === "channel.created") {
+        events.push(
+          typeof event.data === "object" &&
+            event.data !== null &&
+            "kind" in event.data
+            ? String(event.data.kind)
+            : "",
+        );
+      }
+    });
+    const posted = await postMessage(
+      app,
+      ownerCookie,
+      project.orchestrator.channelId,
+      "Add Frontend and Backend specialists",
+    );
+    expect(posted.status).toBe(201);
+    await settle();
+    stop();
+    expect(events.sort()).toEqual(["backend", "frontend"]);
+    const specialists = await sql<{ slug: string; n: number }[]>`
+      select skills.slug, count(*)::int as n
+      from agents
+      join skills on skills.id = agents.skill_id
+      where agents.project_id = ${project.id}::uuid
+        and agents.kind = 'specialist'
+      group by skills.slug
+      order by skills.slug
+    `;
+    expect(
+      specialists.map((row) => ({ slug: row.slug, n: row.n })),
+    ).toEqual([
+      { slug: "backend", n: 1 },
+      { slug: "frontend", n: 1 },
+    ]);
+    const seeds = await sql<{ slug: string; body: string }[]>`
+      select skills.slug, messages.body
+      from messages
+      join channels on channels.id = messages.channel_id
+      join agents on agents.id = channels.agent_id
+      join skills on skills.id = agents.skill_id
+      where channels.project_id = ${project.id}::uuid
+        and messages.author_kind = 'system'
+        and skills.slug in ('frontend', 'backend')
+      order by skills.slug
+    `;
+    expect(seeds.map((row) => ({ slug: row.slug, body: row.body }))).toEqual([
+      {
+        slug: "backend",
+        body: "Add Frontend and Backend specialists",
+      },
+      {
+        slug: "frontend",
+        body: "Add Frontend and Backend specialists",
+      },
+    ]);
+    const replies = await sql<{ body: string }[]>`
+      select body from messages
+      where channel_id = ${project.orchestrator.channelId}::uuid
+        and author_kind = 'agent'
+      order by created_at asc, id asc
+    `;
+    expect(replies.map((row) => row.body)).toEqual([notes]);
+    expect(seen[0]?.system.includes("end with status spawn")).toBe(true);
+    expect(
+      seen[0]?.system.includes(
+        "You cannot edit a repository, run commands, or call tools.",
+      ),
+    ).toBe(true);
+    const idle = await sql<{ status: string }[]>`
+      select status from agents where id = ${project.orchestrator.agentId}::uuid
+    `;
+    expect(idle[0]?.status).toBe("idle");
+
+    const again = await postMessage(
+      app,
+      ownerCookie,
+      project.orchestrator.channelId,
+      "Add Frontend and Backend again",
+    );
+    expect(again.status).toBe(201);
+    await settle();
+    const afterSecond = await sql<{ slug: string; n: number }[]>`
+      select skills.slug, count(*)::int as n
+      from agents
+      join skills on skills.id = agents.skill_id
+      where agents.project_id = ${project.id}::uuid
+        and agents.kind = 'specialist'
+      group by skills.slug
+      order by skills.slug
+    `;
+    expect(
+      afterSecond.map((row) => ({ slug: row.slug, n: row.n })),
+    ).toEqual([
+      { slug: "backend", n: 1 },
+      { slug: "frontend", n: 1 },
+    ]);
+    const secondReply = await sql<{ body: string; status: string }[]>`
+      select messages.body, agent_runs.status
+      from messages
+      join agent_runs on agent_runs.id = messages.run_id
+      where messages.channel_id = ${project.orchestrator.channelId}::uuid
+        and messages.author_kind = 'agent'
+      order by messages.created_at asc, messages.id asc
+    `;
+    expect(secondReply.map((row) => row.body)).toEqual([
+      notes,
+      "Frontend and Backend are already there.",
+    ]);
+    expect(secondReply.every((row) => row.status === "succeeded")).toBe(true);
+
+    const memberPost = await postMessage(
+      app,
+      memberCookie,
+      project.orchestrator.channelId,
+      "Add Frontend and Backend",
+    );
+    expect(memberPost.status).toBe(201);
+    await settle();
+    const afterMember = await sql<{ n: number }[]>`
+      select count(*)::int as n
+      from agents
+      where project_id = ${project.id}::uuid
+        and kind = 'specialist'
+    `;
+    expect(afterMember[0]?.n).toBe(2);
+    const memberReply = await sql<{ body: string }[]>`
+      select body from messages
+      where channel_id = ${project.orchestrator.channelId}::uuid
+        and author_kind = 'agent'
+      order by created_at desc, id desc
+      limit 1
+    `;
+    expect(memberReply[0]?.body).toBe("Only the Owner can add them.");
+    const memberRun = await sql<{ status: string }[]>`
+      select status from agent_runs
+      where channel_id = ${project.orchestrator.channelId}::uuid
+      order by created_at desc
+      limit 1
+    `;
+    expect(memberRun[0]?.status).toBe("succeeded");
+
+    const partial = await createProject(app, ownerCookie);
+    await saveKey(app, ownerCookie, partial.id, {
+      provider: "anthropic",
+      label: "Claude",
+      secret,
+      isPrimary: true,
+    });
+    const existing = await app.request(`/projects/${partial.id}/agents`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: ownerCookie },
+      body: JSON.stringify({ kind: "frontend" }),
+    });
+    expect(existing.status).toBe(201);
+    const partialPost = await postMessage(
+      app,
+      ownerCookie,
+      partial.orchestrator.channelId,
+      "Add Frontend and Backend specialists",
+    );
+    expect(partialPost.status).toBe(201);
+    await settle();
+    const partialAgents = await sql<{ slug: string; n: number }[]>`
+      select skills.slug, count(*)::int as n
+      from agents
+      join skills on skills.id = agents.skill_id
+      where agents.project_id = ${partial.id}::uuid
+        and agents.kind = 'specialist'
+      group by skills.slug
+      order by skills.slug
+    `;
+    expect(
+      partialAgents.map((row) => ({ slug: row.slug, n: row.n })),
+    ).toEqual([
+      { slug: "backend", n: 1 },
+      { slug: "frontend", n: 1 },
+    ]);
+    const partialReply = await sql<{ body: string; status: string }[]>`
+      select messages.body, agent_runs.status
+      from messages
+      join agent_runs on agent_runs.id = messages.run_id
+      where messages.channel_id = ${partial.orchestrator.channelId}::uuid
+        and messages.author_kind = 'agent'
+    `;
+    expect(partialReply[0]?.status).toBe("succeeded");
+    expect(partialReply[0]?.body).toBe(
+      `${notes} Frontend is already there.`,
+    );
+  });
+
+  test("a question run does not spawn a specialist", async () => {
+    seen.length = 0;
+    handler = () => ({
+      text: JSON.stringify({
+        status: "spawn",
+        notes: "Frontend and Backend are ready.",
+        agents: ["frontend", "backend"],
+      }),
+      tokenIn: 3,
+      tokenOut: 2,
+      costEst: 0.01,
+    });
+    const held = createTestApp({ hold: true });
+    const cookie = await signup(held, emailAddress());
+    const project = await createProject(held, cookie);
+    await saveKey(held, cookie, project.id, {
+      provider: "anthropic",
+      label: "Claude",
+      secret,
+      isPrimary: true,
+    });
+    const started = await postMessage(
+      held,
+      cookie,
+      project.orchestrator.channelId,
+      "Hold this",
+    );
+    expect(started.status).toBe(201);
+    const asked = await postMessage(
+      held,
+      cookie,
+      project.orchestrator.channelId,
+      "What specialists do we have?",
+    );
+    const askedBody = (await asked.json()) as { run: { id?: string } };
+    const qaId = askedBody.run.id;
+    if (!qaId) {
+      throw new Error("missing qa run");
+    }
+    await executeRun(
+      {
+        sql,
+        encryptionKey: testEnv().CREDENTIALS_ENCRYPTION_KEY,
+        llm,
+      },
+      qaId,
+    );
+    const kind = await sql<{ kind: string }[]>`
+      select kind from agent_runs where id = ${qaId}::uuid
+    `;
+    expect(kind[0]?.kind).toBe("qa");
+    const specialists = await sql<{ n: number }[]>`
+      select count(*)::int as n from agents
+      where project_id = ${project.id}::uuid
+        and kind = 'specialist'
+    `;
+    expect(specialists[0]?.n).toBe(0);
+    const plans = await sql<{ n: number }[]>`
+      select count(*)::int as n from plans
+      where agent_id = ${project.orchestrator.agentId}::uuid
+    `;
+    expect(plans[0]?.n).toBe(0);
+    const decisions = await sql<{ n: number }[]>`
+      select count(*)::int as n from decisions
+      where project_id = ${project.id}::uuid
+    `;
+    expect(decisions[0]?.n).toBe(0);
+    const conflicts = await sql<{ n: number }[]>`
+      select count(*)::int as n from conflicts
+      where channel_id = ${project.orchestrator.channelId}::uuid
+    `;
+    expect(conflicts[0]?.n).toBe(0);
+  });
+
+  test("frontend skill packs accepted decisions and answers the question", async () => {
+    seen.length = 0;
+    handler = () => finalResult("I am the frontend specialist.");
+    const cookie = await signup(app, emailAddress());
+    const project = await createProject(app, cookie);
+    await saveKey(app, cookie, project.id, {
+      provider: "anthropic",
+      label: "Claude",
+      secret,
+      isPrimary: true,
+    });
+    const spawned = await app.request(`/projects/${project.id}/agents`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ kind: "frontend" }),
+    });
+    expect(spawned.status).toBe(201);
+    const specialist = (await spawned.json()) as { channelId: string };
+    const proposal = "Paint the primary button green.";
+    const proposed = await app.request(`/projects/${project.id}/decisions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({
+        proposal,
+        originChannelId: specialist.channelId,
+      }),
+    });
+    expect(proposed.status).toBe(201);
+    const created = (await proposed.json()) as { decision: { id: string } };
+    const asked = await postMessage(
+      app,
+      cookie,
+      specialist.channelId,
+      "Who are you?",
+    );
+    expect(asked.status).toBe(201);
+    await settle();
+    const pack = await sql<{ system_prompt_pack: string }[]>`
+      select system_prompt_pack
+      from skills
+      where slug = 'frontend'
+        and version = 1
+    `;
+    const text = pack[0]?.system_prompt_pack ?? "";
+    expect(text.includes("Pending decisions are not facts.")).toBe(true);
+    expect(
+      text.includes("Only lines under Accepted decisions: are accepted."),
+    ).toBe(true);
+    expect(
+      text.includes(
+        "Answer the human's question. Mention an accepted decision only when it bears on that question.",
+      ),
+    ).toBe(true);
+    expect(
+      text.includes("You cannot edit a repository, run commands, or call tools."),
+    ).toBe(true);
+    expect(seen[0]?.system.includes("Pending decisions are not facts.")).toBe(
+      true,
+    );
+    expect(
+      seen[0]?.system.includes(
+        "Only lines under Accepted decisions: are accepted.",
+      ),
+    ).toBe(true);
+    expect(
+      seen[0]?.system.includes(
+        "Answer the human's question. Mention an accepted decision only when it bears on that question.",
+      ),
+    ).toBe(true);
+    expect(seen[0]?.user.includes(proposal)).toBe(false);
+    expect(seen[0]?.user.includes("Accepted decisions:")).toBe(true);
+
+    const accepted = await app.request(
+      `/decisions/${created.decision.id}/accept`,
+      { method: "POST", headers: { cookie } },
+    );
+    expect(accepted.status).toBe(200);
+    seen.length = 0;
+    const follow = await postMessage(
+      app,
+      cookie,
+      specialist.channelId,
+      "Who are you now?",
+    );
+    expect(follow.status).toBe(201);
+    await settle();
+    expect(seen[0]?.user.includes("Accepted decisions:")).toBe(true);
+    expect(seen[0]?.user.includes(proposal)).toBe(true);
   });
 });

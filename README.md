@@ -119,7 +119,7 @@ bun run db:migrate:down
 
 Open http://127.0.0.1:3000/signup or http://127.0.0.1:3000/login.
 
-Password signup and login talk to the API with an httpOnly cookie named `dawk_session`. A magic-link request always answers the same way. When `RESEND_API_KEY` and `MAIL_FROM` are both set, magic links, change-email messages, and invites go through Resend. If either is blank, the API prints the message in its console. A live Resend send is unverified until a key is set. A custom domain must be verified before `MAIL_FROM` can use it. Until then, Resend only allows its onboarding from-address, and only to the account owner's own inbox. Open the link in the browser. A magic link expires in 15 minutes and works once. An invite expires in 7 days and works once.
+Password signup and login talk to the API with an httpOnly cookie named `dawk_session`. A magic-link request always answers the same way. When `RESEND_API_KEY` and `MAIL_FROM` are both set, magic links, change-email messages, and invites go through Resend. If Resend rejects a send and `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, and `SMTP_PASSWORD` are set, the API retries through SMTP. SMTP sends as `SMTP_USER` when that address differs from `MAIL_FROM`. SMTP alone is enough when Resend is unset. If neither transport is configured, the API prints the message in its console. A live Resend send is unverified until a key is set. A custom domain must be verified before `MAIL_FROM` can use it. Until then, Resend only allows its onboarding from-address, and only to the account owner's own inbox. Open the link in the browser. A magic link expires in 15 minutes and works once. An invite expires in 7 days and works once.
 
 Change email from the account page. The address does not change until you open the confirmation link from the API console.
 
@@ -141,7 +141,7 @@ A friend test needs two public URLs because a long-lived channel stream through 
 
 ## Secrets
 
-Do not commit `.env`, API keys, passwords, or session tokens. `SESSION_SECRET` and `CREDENTIALS_ENCRYPTION_KEY` must differ. Leave `RESEND_API_KEY` and `MAIL_FROM` blank to keep mail in the API console.
+Do not commit `.env`, API keys, passwords, or session tokens. `SESSION_SECRET` and `CREDENTIALS_ENCRYPTION_KEY` must differ. Leave `RESEND_API_KEY`, `MAIL_FROM`, and `SMTP_*` blank to keep mail in the API console.
 
 ## Scope right now
 

@@ -487,6 +487,19 @@ async function columnExists(
   return rows[0]?.exists === true;
 }
 
+async function skillPack(
+  sql: ReturnType<typeof createSql>,
+  slug: string,
+): Promise<string | null> {
+  const rows = await sql<{ system_prompt_pack: string }[]>`
+    select system_prompt_pack
+    from skills
+    where slug = ${slug}
+      and version = 1
+  `;
+  return rows[0]?.system_prompt_pack ?? null;
+}
+
 async function skillSlugExists(
   sql: ReturnType<typeof createSql>,
   slug: string,
@@ -563,6 +576,30 @@ async function main(): Promise<void> {
     }
 
     await migrateDown(sql, { force: true });
+    const rolledOrchestrator = await skillPack(sql, "orchestrator");
+    if (rolledOrchestrator?.includes("status spawn")) {
+      throw new Error("Spawn down migration left the spawn instruction");
+    }
+    const rolledFrontend = await skillPack(sql, "frontend");
+    const rolledBackend = await skillPack(sql, "backend");
+    if (
+      rolledFrontend?.includes("Pending decisions are not facts.") ||
+      rolledBackend?.includes("Pending decisions are not facts.")
+    ) {
+      throw new Error("Spawn down migration left the specialist pack");
+    }
+    if (
+      !rolledFrontend?.includes(
+        "You cannot edit a repository, run commands, or call tools.",
+      )
+    ) {
+      throw new Error("Spawn down migration removed the frontend pack");
+    }
+    if (!(await indexExists(sql, "agent_runs_one_active_qa"))) {
+      throw new Error("Spawn down migration removed the qa index");
+    }
+
+    await migrateDown(sql, { force: true });
     if (await indexExists(sql, "agent_runs_one_active_qa")) {
       throw new Error("Queue down migration left the qa index");
     }
@@ -636,6 +673,45 @@ async function main(): Promise<void> {
       throw new Error(
         "Up migration did not restore users, sessions, last_four, skills, and plans",
       );
+    }
+    const frontendPack = await skillPack(sql, "frontend");
+    if (
+      !frontendPack?.includes("Pending decisions are not facts.") ||
+      !frontendPack.includes(
+        "Only lines under Accepted decisions: are accepted.",
+      ) ||
+      !frontendPack.includes(
+        "Answer the human's question. Mention an accepted decision only when it bears on that question.",
+      ) ||
+      !frontendPack.includes(
+        "You cannot edit a repository, run commands, or call tools.",
+      )
+    ) {
+      throw new Error("Up migration did not update the frontend pack");
+    }
+    const backendPack = await skillPack(sql, "backend");
+    if (
+      !backendPack?.includes("Pending decisions are not facts.") ||
+      !backendPack.includes(
+        "Only lines under Accepted decisions: are accepted.",
+      ) ||
+      !backendPack.includes(
+        "Answer the human's question. Mention an accepted decision only when it bears on that question.",
+      ) ||
+      !backendPack.includes(
+        "You cannot edit a repository, run commands, or call tools.",
+      )
+    ) {
+      throw new Error("Up migration did not update the backend pack");
+    }
+    const orchestratorPack = await skillPack(sql, "orchestrator");
+    if (
+      !orchestratorPack?.includes("status spawn") ||
+      !orchestratorPack.includes(
+        "You cannot edit a repository, run commands, or call tools.",
+      )
+    ) {
+      throw new Error("Up migration did not update the orchestrator pack");
     }
 
     console.log("schema: constraints ok");

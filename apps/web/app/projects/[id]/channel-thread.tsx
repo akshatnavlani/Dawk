@@ -136,15 +136,21 @@ export function ChannelThread({
   channelsRef.current = channels;
 
   useEffect(() => {
-    void (async () => {
+    let cancelled = false;
+    async function loadChannels(redirect: boolean) {
       const response = await fetch(
         `${API_ORIGIN}/projects/${projectId}/channels`,
         {
           credentials: "include",
         },
       );
+      if (cancelled) {
+        return;
+      }
       if (response.status === 401) {
-        window.location.assign("/login");
+        if (redirect) {
+          window.location.assign("/login");
+        }
         return;
       }
       if (!response.ok) {
@@ -154,7 +160,15 @@ export function ChannelThread({
       const list = body.channels ?? [];
       setChannels(list);
       setChannelId((current) => current ?? list[0]?.id ?? null);
-    })();
+    }
+    void loadChannels(true);
+    const poll = window.setInterval(() => {
+      void loadChannels(false);
+    }, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(poll);
+    };
   }, [projectId]);
 
   useEffect(() => {
@@ -164,7 +178,7 @@ export function ChannelThread({
     let cancelled = false;
     setRun(null);
     setPlan(null);
-    async function loadHistory() {
+    async function loadHistory(replace: boolean) {
       const response = await fetch(
         `${API_ORIGIN}/channels/${channelId}/messages`,
         { credentials: "include" },
@@ -176,8 +190,13 @@ export function ChannelThread({
         messages?: ChatMessage[];
         nextCursor?: string | null;
       };
-      setMessages(body.messages ?? []);
-      setNextCursor(body.nextCursor ?? null);
+      const incoming = body.messages ?? [];
+      if (replace) {
+        setMessages(incoming);
+        setNextCursor(body.nextCursor ?? null);
+        return;
+      }
+      setMessages((current) => mergeMessages(current, incoming));
     }
     async function loadRun() {
       const response = await fetch(
@@ -233,7 +252,7 @@ export function ChannelThread({
       setConflict(body.conflict ?? null);
     }
 
-    void loadHistory();
+    void loadHistory(true);
     void loadRun();
     void loadPlan();
     void loadQueue();
@@ -288,7 +307,7 @@ export function ChannelThread({
     });
     source.onopen = () => {
       if (opened) {
-        void loadHistory();
+        void loadHistory(false);
         void loadRun();
         void loadPlan();
         void loadQueue();
@@ -296,8 +315,13 @@ export function ChannelThread({
       }
       opened = true;
     };
+    const poll = window.setInterval(() => {
+      void loadHistory(false);
+      void loadRun();
+    }, 2000);
     return () => {
       cancelled = true;
+      window.clearInterval(poll);
       source.close();
     };
   }, [channelId, projectId]);

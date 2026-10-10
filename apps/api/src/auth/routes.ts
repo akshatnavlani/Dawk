@@ -14,11 +14,10 @@ import {
   type GoogleTokenClient,
   googleAuthorizeUrl,
 } from "./google";
-import type { Mailer } from "./mail";
+import { type Mailer, mailErrorCode } from "./mail";
 import { hashPassword, verifyPassword } from "./passwords";
 import type { RateLimiter } from "./rate-limit";
 
-const API_ORIGIN = "http://127.0.0.1:3001";
 const SESSION_SECONDS = 14 * 24 * 60 * 60;
 const SESSION_COOKIE = "dawk_session";
 
@@ -43,6 +42,7 @@ type AuthDeps = {
   sql: Sql;
   sessionSecret: string;
   appUrl: string;
+  apiOrigin: string;
   mailer: Mailer;
   rateLimiter: RateLimiter;
   googleClientId?: string;
@@ -57,7 +57,7 @@ export type SessionUser = {
 
 function jsonError(
   c: Context,
-  status: 400 | 401 | 409 | 429 | 503,
+  status: 400 | 401 | 409 | 422 | 429 | 503,
   error: string,
 ) {
   return c.json({ error }, status);
@@ -74,13 +74,15 @@ function clientIp(c: Context): string {
 function sessionCookie(value: string, secure: boolean): string {
   const sameSite = secure ? "None" : "Lax";
   const secureFlag = secure ? "; Secure" : "";
-  return `${SESSION_COOKIE}=${value}; HttpOnly; SameSite=${sameSite}; Path=/; Max-Age=${SESSION_SECONDS}${secureFlag}`;
+  const partitioned = secure ? "; Partitioned" : "";
+  return `${SESSION_COOKIE}=${value}; HttpOnly; SameSite=${sameSite}; Path=/; Max-Age=${SESSION_SECONDS}${secureFlag}${partitioned}`;
 }
 
 function clearSessionCookie(secure: boolean): string {
   const sameSite = secure ? "None" : "Lax";
   const secureFlag = secure ? "; Secure" : "";
-  return `${SESSION_COOKIE}=; HttpOnly; SameSite=${sameSite}; Path=/; Max-Age=0${secureFlag}`;
+  const partitioned = secure ? "; Partitioned" : "";
+  return `${SESSION_COOKIE}=; HttpOnly; SameSite=${sameSite}; Path=/; Max-Age=0${secureFlag}${partitioned}`;
 }
 
 function readCookie(c: Context): string | null {
@@ -289,12 +291,16 @@ export function createAuthRoutes(deps: AuthDeps): Hono {
         now() + interval '15 minutes'
       )
     `;
-    const link = `${API_ORIGIN}/auth/magic-link/consume?token=${encodeURIComponent(token)}`;
-    await deps.mailer.send({
-      to: parsed.data.email,
-      subject: "Your Dawk sign-in link",
-      text: `Sign in to Dawk:\n${link}\n\nThis link expires in 15 minutes and works once.`,
-    });
+    const link = `${deps.apiOrigin}/auth/magic-link/consume?token=${encodeURIComponent(token)}`;
+    try {
+      await deps.mailer.send({
+        to: parsed.data.email,
+        subject: "Your Dawk sign-in link",
+        text: `Sign in to Dawk:\n${link}\n\nThis link expires in 15 minutes and works once.`,
+      });
+    } catch (error) {
+      return jsonError(c, 422, mailErrorCode(error));
+    }
     return c.json({ ok: true }, 202);
   });
 
@@ -521,12 +527,16 @@ export function createAuthRoutes(deps: AuthDeps): Hono {
         now() + interval '15 minutes'
       )
     `;
-    const link = `${API_ORIGIN}/auth/email/verify?token=${encodeURIComponent(token)}`;
-    await deps.mailer.send({
-      to: parsed.data.email,
-      subject: "Confirm your new Dawk email",
-      text: `Confirm this email for Dawk:\n${link}\n\nThis link expires in 15 minutes and works once.`,
-    });
+    const link = `${deps.apiOrigin}/auth/email/verify?token=${encodeURIComponent(token)}`;
+    try {
+      await deps.mailer.send({
+        to: parsed.data.email,
+        subject: "Confirm your new Dawk email",
+        text: `Confirm this email for Dawk:\n${link}\n\nThis link expires in 15 minutes and works once.`,
+      });
+    } catch (error) {
+      return jsonError(c, 422, mailErrorCode(error));
+    }
     return c.json({ ok: true }, 202);
   });
 

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import {
   API_ORIGIN,
   buttonClass,
+  errorCode,
   fieldClass,
   linkClass,
   messageFor,
@@ -15,10 +16,15 @@ export function LoginForm() {
   const [notice, setNotice] = useState<string | null>(null);
   const [signInPending, setSignInPending] = useState(false);
   const [linkPending, setLinkPending] = useState(false);
+  const [signupHref, setSignupHref] = useState("/signup");
 
   useEffect(() => {
-    const code = new URLSearchParams(window.location.search).get("error");
-    setError(messageFor(code));
+    const params = new URLSearchParams(window.location.search);
+    setError(messageFor(params.get("error")));
+    const next = params.get("next");
+    if (next?.startsWith("/invites/accept")) {
+      setSignupHref(`/signup?next=${encodeURIComponent(next)}`);
+    }
   }, []);
 
   async function signIn(event: React.FormEvent<HTMLFormElement>) {
@@ -63,8 +69,10 @@ export function LoginForm() {
       );
       return;
     }
-    const body = (await response.json()) as { error?: string };
-    setError(messageFor(body.error ?? null));
+    setError(
+      messageFor(await errorCode(response)) ??
+        "Something went wrong. Try again.",
+    );
   }
 
   return (
@@ -114,7 +122,7 @@ export function LoginForm() {
       </p>
       <p className="mt-4 text-sm text-stone-500">
         No account yet?{" "}
-        <a className={linkClass} href="/signup">
+        <a className={linkClass} href={signupHref}>
           Create one
         </a>
       </p>
